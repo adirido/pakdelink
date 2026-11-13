@@ -1,0 +1,181 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Default safety net: deny access to unknown collections
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isOptString(data, key, maxLen) {
+      return !(key in data) || data[key] == null || (data[key] is string && data[key].size() <= maxLen);
+    }
+
+    function isValidAppUser(data) {
+      return data.keys().hasAll(['id', 'uid', 'employeeId', 'name', 'role', 'pin']) &&
+        data.keys().hasOnly(['id', 'uid', 'employeeId', 'email', 'name', 'role', 'pin', 'createdAt', 'updatedAt']) &&
+        data.id is number &&
+        data.uid is string && data.uid.size() >= 1 && data.uid.size() <= 128 &&
+        data.employeeId is string && data.employeeId.size() >= 1 && data.employeeId.size() <= 64 &&
+        data.name is string && data.name.size() >= 1 && data.name.size() <= 120 &&
+        data.role in ['owner', 'manager', 'cashier', 'technician'] &&
+        data.pin is string && data.pin.size() >= 1 && data.pin.size() <= 64 &&
+        isOptString(data, 'email', 128) &&
+        isOptString(data, 'createdAt', 64) &&
+        isOptString(data, 'updatedAt', 64);
+    }
+
+    function isValidDigitalTransaction(data) {
+      return data.keys().hasAll(['id', 'type', 'provider', 'nominal', 'profit', 'referenceNumber']) &&
+        data.keys().hasOnly([
+          'id', 'type', 'provider', 'targetAccount', 'customerName',
+          'nominal', 'adminBankCost', 'adminStoreFee', 'totalCustomerPaid',
+          'profit', 'paymentMethod', 'referenceNumber', 'status',
+          'cashierUid', 'fundSource', 'operatorName', 'notes',
+          'createdAt', 'paidAt', 'updatedAt'
+        ]) &&
+        data.id is number &&
+        data.type is string && data.type.size() >= 1 && data.type.size() <= 100 &&
+        data.provider is string && data.provider.size() >= 1 && data.provider.size() <= 120 &&
+        data.nominal is number && data.nominal >= 0 &&
+        data.profit is number &&
+        data.referenceNumber is string && data.referenceNumber.size() >= 1 && data.referenceNumber.size() <= 128 &&
+        isOptString(data, 'targetAccount', 200) &&
+        isOptString(data, 'customerName', 160) &&
+        (!( 'adminBankCost' in data ) || data.adminBankCost is number) &&
+        (!( 'adminStoreFee' in data ) || data.adminStoreFee is number) &&
+        (!( 'totalCustomerPaid' in data ) || data.totalCustomerPaid is number) &&
+        isOptString(data, 'paymentMethod', 64) &&
+        isOptString(data, 'status', 64) &&
+        isOptString(data, 'cashierUid', 128) &&
+        isOptString(data, 'fundSource', 100) &&
+        isOptString(data, 'operatorName', 120) &&
+        isOptString(data, 'notes', 2000) &&
+        isOptString(data, 'createdAt', 64) &&
+        isOptString(data, 'paidAt', 64) &&
+        isOptString(data, 'updatedAt', 64);
+    }
+
+    function isValidTitipanAccount(data) {
+      return data.keys().hasAll(['id', 'name', 'balance']) &&
+        data.keys().hasOnly(['id', 'name', 'balance', 'createdAt', 'updatedAt']) &&
+        data.id is string && data.id.size() >= 1 && data.id.size() <= 128 &&
+        data.name is string && data.name.size() >= 1 && data.name.size() <= 160 &&
+        data.balance is number && data.balance >= 0 &&
+        isOptString(data, 'createdAt', 64) &&
+        isOptString(data, 'updatedAt', 64);
+    }
+
+    function isValidStoreExpense(data) {
+      return data.keys().hasAll(['id', 'category', 'title', 'amount', 'expenseDate', 'paidBy']) &&
+        data.keys().hasOnly(['id', 'category', 'title', 'amount', 'expenseDate', 'paidBy', 'notes', 'createdAt', 'updatedAt']) &&
+        data.id is number &&
+        data.category is string && data.category.size() >= 1 && data.category.size() <= 100 &&
+        data.title is string && data.title.size() >= 1 && data.title.size() <= 300 &&
+        data.amount is number && data.amount >= 0 &&
+        data.expenseDate is string && data.expenseDate.size() >= 8 && data.expenseDate.size() <= 32 &&
+        data.paidBy is string && data.paidBy.size() >= 1 && data.paidBy.size() <= 64 &&
+        isOptString(data, 'notes', 1000) &&
+        isOptString(data, 'createdAt', 64) &&
+        isOptString(data, 'updatedAt', 64);
+    }
+
+    function isValidSetting(settingId, data) {
+      return (
+        settingId == 'digital_account_balances' &&
+        data.keys().hasOnly(['cash', 'brimo1', 'brimo2', 'dana1', 'dana2', 'seabank', 'tagihan', 'hutang', 'tagihanNote', 'updatedAt']) &&
+        data.cash is number && data.cash >= 0 &&
+        data.brimo1 is number && data.brimo1 >= 0 &&
+        data.brimo2 is number && data.brimo2 >= 0 &&
+        data.dana1 is number && data.dana1 >= 0 &&
+        data.dana2 is number && data.dana2 >= 0 &&
+        data.seabank is number && data.seabank >= 0 &&
+        (!( 'tagihan' in data ) || (data.tagihan is number && data.tagihan >= 0)) &&
+        (!( 'hutang' in data ) || (data.hutang is number && data.hutang >= 0)) &&
+        isOptString(data, 'tagihanNote', 1000) &&
+        isOptString(data, 'updatedAt', 64)
+      ) || (
+        settingId == 'margin_fee_ledger' &&
+        data.keys().hasOnly(['baselineDateKey', 'takenByDate', 'history', 'updatedAt']) &&
+        isOptString(data, 'baselineDateKey', 32) &&
+        (!( 'takenByDate' in data ) || data.takenByDate is map) &&
+        (!( 'history' in data ) || (data.history is list && data.history.size() <= 100)) &&
+        isOptString(data, 'updatedAt', 64)
+      ) || (
+        settingId == 'qris_profile' &&
+        data.keys().hasOnly(['merchantName', 'nmid', 'subCode', 'imageUrl', 'updatedAt']) &&
+        isOptString(data, 'merchantName', 160) &&
+        isOptString(data, 'nmid', 120) &&
+        isOptString(data, 'subCode', 64) &&
+        isOptString(data, 'imageUrl', 900000) &&
+        isOptString(data, 'updatedAt', 64)
+      );
+    }
+
+    // Koleksi Staf & Pengguna (RBAC & Autentikasi ID Karyawan)
+    match /users/{userId} {
+      allow list: if true;
+      allow get: if isValidId(userId);
+      allow create, update: if isValidId(userId) && isValidAppUser(request.resource.data);
+      allow delete: if isValidId(userId);
+    }
+
+    // Koleksi Transaksi Agen Digital & Margin Fee
+    match /digital_transactions/{transactionId} {
+      allow list: if true;
+      allow get: if isValidId(transactionId);
+      allow create, update: if isValidId(transactionId) && isValidDigitalTransaction(request.resource.data);
+      allow delete: if isValidId(transactionId);
+    }
+
+    // Koleksi Pengaturan Toko, Saldo Akun & Ledger Margin Fee
+    match /settings/{settingId} {
+      allow list: if true;
+      allow get: if isValidId(settingId);
+      allow create, update: if isValidId(settingId) && isValidSetting(settingId, request.resource.data);
+      allow delete: if false;
+    }
+
+    // Koleksi Saldo Titipan Pelanggan
+    match /titipan_accounts/{titipanId} {
+      allow list: if true;
+      allow get: if isValidId(titipanId);
+      allow create, update: if isValidId(titipanId) && isValidTitipanAccount(request.resource.data);
+      allow delete: if isValidId(titipanId);
+    }
+
+    // Koleksi Pengeluaran & Beban Operasional Toko
+    match /store_expenses/{expenseId} {
+      allow list: if true;
+      allow get: if isValidId(expenseId);
+      allow create, update: if isValidId(expenseId) && isValidStoreExpense(request.resource.data);
+      allow delete: if isValidId(expenseId);
+    }
+
+    // Koleksi Stok Aksesoris
+    match /stok_aksesoris/{accessoryId} {
+      allow list: if true;
+      allow get, create, update, delete: if isValidId(accessoryId);
+    }
+
+    // Koleksi HP & IMEI
+    match /hp_imei/{phoneId} {
+      allow list: if true;
+      allow get, create, update, delete: if isValidId(phoneId);
+
+      // Sub-koleksi unit fisik / serial IMEI
+      match /serials/{serialId} {
+        allow list: if true;
+        allow get, create, update, delete: if isValidId(phoneId) && isValidId(serialId);
+      }
+    }
+
+    // Uji koneksi server Firestore saat aplikasi boot
+    match /test/{docId} {
+      allow read: if true;
+    }
+  }
+}
