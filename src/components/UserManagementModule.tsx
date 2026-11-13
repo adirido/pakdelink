@@ -544,7 +544,7 @@ export const UserManagementModule: React.FC = () => {
 
               <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 text-[11px] text-slate-500 space-y-1">
                 <div className="font-semibold text-slate-700">Catatan Keamanan:</div>
-                <div>• Kasir hanya dapat mengakses modul transaksi &amp; riwayat.</div>
+                <div>• Kasir hanya dapat mengakses modul transaksi, riwayat, serta card Tagihan, Hutang &amp; Admin Fee.</div>
                 <div>• Hanya Owner yang dapat mengelola pengguna &amp; edit saldo akun.</div>
               </div>
 

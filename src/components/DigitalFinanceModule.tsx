@@ -194,6 +194,10 @@ export const getAvailableProviders = (type: string): ProviderOption[] => {
 export const DigitalFinanceModule: React.FC<DigitalFinanceModuleProps> = ({ onPrintReceipt }) => {
   const { currentRole, operatorName, activeStaff } = useAuth();
   const isOwner = currentRole === 'owner';
+  const isCashier = currentRole === 'cashier';
+  const canEditMainCards = isOwner;
+  const canEditTitipan = !isCashier && currentRole !== 'technician';
+  const canManageAdminFee = isOwner || isCashier || currentRole === 'manager';
 
   // Transaksi State
   const [transactions, setTransactions] = useState<DigitalTransaction[]>(() => {
@@ -316,22 +320,37 @@ export const DigitalFinanceModule: React.FC<DigitalFinanceModuleProps> = ({ onPr
   const [deletePenitipTarget, setDeletePenitipTarget] = useState<TitipanAccount | null>(null);
   const [savingTitipan, setSavingTitipan] = useState(false);
 
-  // Tutup modal update saldo / ambil fee otomatis jika role bukan Owner
-  useEffect(() => {
-    if (!isOwner && updateModalOpen) {
-      setUpdateModalOpen(false);
-      setSelectedAccountForUpdate(null);
-    }
-    if (!isOwner && takeFeeModalOpen) {
-      setTakeFeeModalOpen(false);
-    }
-  }, [isOwner, updateModalOpen, takeFeeModalOpen]);
-
   const hasTitipanChildModalOpen =
     addPenitipModalOpen ||
     Boolean(topupPenitipTarget) ||
     Boolean(tarikPenitipTarget) ||
     Boolean(deletePenitipTarget);
+
+  // Tutup modal otomatis jika role aktif tidak memiliki hak akses
+  useEffect(() => {
+    if (!canEditMainCards && updateModalOpen) {
+      setUpdateModalOpen(false);
+      setSelectedAccountForUpdate(null);
+    }
+    if (!canManageAdminFee && takeFeeModalOpen) {
+      setTakeFeeModalOpen(false);
+    }
+    if (!canEditTitipan && (titipanModalOpen || hasTitipanChildModalOpen)) {
+      setTitipanModalOpen(false);
+      setAddPenitipModalOpen(false);
+      setTopupPenitipTarget(null);
+      setTarikPenitipTarget(null);
+      setDeletePenitipTarget(null);
+    }
+  }, [
+    canEditMainCards,
+    canManageAdminFee,
+    canEditTitipan,
+    updateModalOpen,
+    takeFeeModalOpen,
+    titipanModalOpen,
+    hasTitipanChildModalOpen,
+  ]);
 
   // Lock body scroll whenever any modal in this module is active
   useBodyScrollLock(
@@ -339,14 +358,13 @@ export const DigitalFinanceModule: React.FC<DigitalFinanceModuleProps> = ({ onPr
       hutangModalOpen ||
       Boolean(hutangDetailTarget) ||
       Boolean(hutangConfirmTarget) ||
-      (isOwner && updateModalOpen) ||
+      (canEditMainCards && updateModalOpen) ||
       tagihanListModalOpen ||
       tagihanModalOpen ||
       Boolean(tagihanDetailTarget) ||
       Boolean(tagihanConfirmTarget) ||
-      (isOwner && takeFeeModalOpen) ||
-      titipanModalOpen ||
-      hasTitipanChildModalOpen
+      (canManageAdminFee && takeFeeModalOpen) ||
+      (canEditTitipan && (titipanModalOpen || hasTitipanChildModalOpen))
   );
 
   // Close peruntukan dropdown when clicking outside
@@ -1352,9 +1370,9 @@ export const DigitalFinanceModule: React.FC<DigitalFinanceModuleProps> = ({ onPr
   const totalDigitalMargin = marginFeeSummary.todayRemainingFee;
   const previousUnclaimedFee = marginFeeSummary.previousUnclaimedFee;
 
-  // Handlers Ambil Margin Fee (Khusus Role Owner, selalu dipotong dari saldo Cash)
+  // Handlers Ambil Margin Fee (Owner & Kasir, selalu dipotong dari saldo Cash)
   const handleOpenTakeFeeModal = () => {
-    if (!isOwner) return;
+    if (!canManageAdminFee) return;
     if (marginFeeSummary.totalAvailableToTake <= 0) return;
     setTakeIncludeToday(marginFeeSummary.todayRemainingFee > 0);
     setTakeIncludePrevious(marginFeeSummary.previousUnclaimedFee > 0);
@@ -1368,14 +1386,14 @@ export const DigitalFinanceModule: React.FC<DigitalFinanceModuleProps> = ({ onPr
 
   const handleConfirmTakeMarginFee = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!isOwner) return;
+    if (!canManageAdminFee) return;
 
     try {
       const result = await takeMarginFeeFromCashAsync({
         summary: marginFeeSummary,
         includeToday: takeIncludeToday,
         includePrevious: takeIncludePrevious,
-        takenBy: activeStaff?.name || operatorName || 'Owner',
+        takenBy: activeStaff?.name || operatorName || (isOwner ? 'Owner' : 'Kasir'),
       });
 
       if (!result.success) {
@@ -1617,12 +1635,14 @@ export const DigitalFinanceModule: React.FC<DigitalFinanceModuleProps> = ({ onPr
     notifyDataUpdated('digital');
   };
 
-  // Handlers Card Titipan
+  // Handlers Card Titipan (Read-only untuk Kasir)
   const handleOpenTitipanModal = () => {
+    if (!canEditTitipan) return;
     setTitipanModalOpen(true);
   };
 
   const handleOpenAddPenitipModal = () => {
+    if (!canEditTitipan) return;
     setNewPenitipName('');
     setNewPenitipNominal(0);
     setAddPenitipModalOpen(true);
@@ -1630,6 +1650,7 @@ export const DigitalFinanceModule: React.FC<DigitalFinanceModuleProps> = ({ onPr
 
   const handleSaveNewPenitip = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!canEditTitipan) return;
     const cleanName = newPenitipName.trim();
     if (!cleanName || newPenitipNominal <= 0) return;
 
@@ -1671,12 +1692,14 @@ export const DigitalFinanceModule: React.FC<DigitalFinanceModuleProps> = ({ onPr
   };
 
   const handleOpenTopupPenitipModal = (account: TitipanAccount) => {
+    if (!canEditTitipan) return;
     setTopupPenitipTarget(account);
     setTopupPenitipAmount(0);
   };
 
   const handleSaveTopupPenitip = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!canEditTitipan) return;
     if (!topupPenitipTarget || topupPenitipAmount <= 0) return;
 
     setSavingTitipan(true);
@@ -1720,6 +1743,7 @@ export const DigitalFinanceModule: React.FC<DigitalFinanceModuleProps> = ({ onPr
   };
 
   const handleOpenTarikPenitipModal = (account: TitipanAccount) => {
+    if (!canEditTitipan) return;
     setTarikPenitipTarget(account);
     setTarikJenisTransaksi('Transfer');
     setTarikNoRekening('');
@@ -1729,6 +1753,7 @@ export const DigitalFinanceModule: React.FC<DigitalFinanceModuleProps> = ({ onPr
 
   const handleSaveTarikPenitip = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!canEditTitipan) return;
     if (!tarikPenitipTarget || tarikNominal <= 0) return;
     if (tarikJenisTransaksi === 'Transfer' && !tarikNoRekening.trim()) return;
 
@@ -1810,11 +1835,12 @@ export const DigitalFinanceModule: React.FC<DigitalFinanceModuleProps> = ({ onPr
   };
 
   const handleOpenDeletePenitipModal = (account: TitipanAccount) => {
+    if (!canEditTitipan) return;
     setDeletePenitipTarget(account);
   };
 
   const handleConfirmDeletePenitip = async () => {
-    if (!deletePenitipTarget) return;
+    if (!canEditTitipan || !deletePenitipTarget) return;
     setSavingTitipan(true);
     try {
       const targetId = deletePenitipTarget.id;
@@ -1863,7 +1889,7 @@ export const DigitalFinanceModule: React.FC<DigitalFinanceModuleProps> = ({ onPr
             </div>
           </div>
 
-          {isOwner && previousUnclaimedFee > 0 && (
+          {canManageAdminFee && previousUnclaimedFee > 0 && (
             <button
               type="button"
               onClick={handleOpenTakeFeeModal}
@@ -2091,6 +2117,26 @@ export const DigitalFinanceModule: React.FC<DigitalFinanceModuleProps> = ({ onPr
             }
 
             if (cardKey === 'titipan') {
+              if (!canEditTitipan) {
+                return (
+                  <div
+                    className={`${boxSizeClass} rounded-lg bg-teal-50/50 border border-teal-200/90 flex flex-col justify-between shadow-2xs transition`}
+                  >
+                    <div className={`h-4 w-full flex items-center justify-between gap-1 ${titleTextClass} font-semibold leading-tight`}>
+                      <span className="text-teal-950 font-bold truncate">Titipan</span>
+                    </div>
+                    <div className="w-full flex items-baseline overflow-visible">
+                      <span
+                        className={`font-extrabold text-teal-950 ${valueTextClass} font-mono whitespace-nowrap leading-none select-all`}
+                        title={formatRupiah(totalTitipanBalance)}
+                      >
+                        {formatRupiah(totalTitipanBalance)}
+                      </span>
+                    </div>
+                  </div>
+                );
+              }
+
               return (
                 <button
                   type="button"
@@ -2162,7 +2208,7 @@ export const DigitalFinanceModule: React.FC<DigitalFinanceModuleProps> = ({ onPr
                 className={`${boxSizeClass} rounded-lg border flex flex-col justify-between shadow-2xs transition ${
                   totalDigitalMargin < 0
                     ? 'bg-rose-50 border-rose-200 hover:border-rose-300'
-                    : isOwner && previousUnclaimedFee > 0
+                    : canManageAdminFee && previousUnclaimedFee > 0
                     ? 'bg-gradient-to-br from-emerald-50 to-amber-50/80 border-amber-300 hover:border-amber-400'
                     : 'bg-emerald-50 border-emerald-200 hover:border-emerald-300'
                 }`}
@@ -2173,7 +2219,7 @@ export const DigitalFinanceModule: React.FC<DigitalFinanceModuleProps> = ({ onPr
                   }`}
                 >
                   <span className="truncate">Admin Fee</span>
-                  {isOwner ? (
+                  {canManageAdminFee ? (
                     <button
                       type="button"
                       onClick={handleOpenTakeFeeModal}
@@ -2215,7 +2261,7 @@ export const DigitalFinanceModule: React.FC<DigitalFinanceModuleProps> = ({ onPr
                       totalDigitalMargin < 0 ? 'text-rose-700' : 'text-emerald-800'
                     }`}
                     title={
-                      isOwner && previousUnclaimedFee > 0
+                      canManageAdminFee && previousUnclaimedFee > 0
                         ? `Hari ini: ${formatSignedRupiah(totalDigitalMargin)} | Kemarin belum diambil: +${formatRupiah(previousUnclaimedFee)}`
                         : marginFeeSummary.todayTaken > 0
                         ? `Sisa hari ini: ${formatSignedRupiah(totalDigitalMargin)} (Total profit: ${formatSignedRupiah(marginFeeSummary.todayGrossProfit)} - Diambil: ${formatRupiah(marginFeeSummary.todayTaken)})`
@@ -4237,9 +4283,9 @@ export const DigitalFinanceModule: React.FC<DigitalFinanceModuleProps> = ({ onPr
       )}
 
       {/* ======================================================== */}
-      {/* 3.2 MODAL AMBIL MARGIN FEE CLOSING (KHUSUS ROLE OWNER)   */}
+      {/* 3.2 MODAL AMBIL MARGIN FEE CLOSING (OWNER & KASIR)          */}
       {/* ======================================================== */}
-      {isOwner && takeFeeModalOpen && (
+      {canManageAdminFee && takeFeeModalOpen && (
         <div
           role="dialog"
           aria-modal="true"
@@ -4266,7 +4312,7 @@ export const DigitalFinanceModule: React.FC<DigitalFinanceModuleProps> = ({ onPr
                   <h3 className="font-bold text-xs sm:text-sm text-slate-900 flex items-center gap-1.5 flex-wrap">
                     <span>Ambil Admin Fee (Closing)</span>
                     <span className="text-emerald-800 bg-emerald-100/90 px-1.5 py-0.2 rounded border border-emerald-200 text-[9.5px] font-bold">
-                      Khusus Owner
+                      Owner &amp; Kasir
                     </span>
                   </h3>
                   <p className="text-[10px] text-slate-500 font-medium">
@@ -4430,7 +4476,8 @@ export const DigitalFinanceModule: React.FC<DigitalFinanceModuleProps> = ({ onPr
       {/* ======================================================== */}
       {/* 3.3 MODAL UTAMA CARD TITIPAN (GAYA VISUAL MODAL BRIMO)    */}
       {/* ======================================================== */}
-      {titipanModalOpen &&
+      {canEditTitipan &&
+        titipanModalOpen &&
         typeof document !== 'undefined' &&
         createPortal(
           <div
