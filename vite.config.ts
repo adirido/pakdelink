@@ -30,8 +30,9 @@ export default defineConfig(() => {
     server: {
       port: 3000,
       host: '0.0.0.0',
-      // HMR is disabled in AI Studio environment
+      // HMR & WebSocket server are disabled in AI Studio environment
       hmr: false,
+      ws: false as const,
       watch: null,
     },
   };

@@ -21,6 +21,11 @@ function getPort(): number {
     const parsed = parseInt(process.argv[portArgIndex + 1], 10);
     if (!isNaN(parsed)) return parsed;
   }
+  const eqPortArg = process.argv.find((arg) => arg.startsWith('--port='));
+  if (eqPortArg) {
+    const parsed = parseInt(eqPortArg.slice('--port='.length), 10);
+    if (!isNaN(parsed)) return parsed;
+  }
   // Dev server in AI Studio must run on port 3000
   if (process.env.NODE_ENV !== 'production') {
     return 3000;
@@ -51,6 +56,8 @@ async function startServer() {
   // API Routes
   app.use('/api', apiRouter);
 
+  let viteServer: Awaited<ReturnType<(typeof import('vite'))['createServer']>> | null = null;
+
   if (process.env.NODE_ENV === 'production') {
     const distPath = path.resolve(__dirname, 'dist');
     app.use(express.static(distPath));
@@ -58,16 +65,35 @@ async function startServer() {
       res.sendFile(path.join(distPath, 'index.html'));
     });
   } else {
-    const { createServer: createViteServer } = await import('vite');
-    const vite = await createViteServer({
-      server: {
-        middlewareMode: true,
-        hmr: false,
-        watch: null,
-      },
-      appType: 'spa',
+    const viteReadyPromise = import('vite').then(({ createServer: createViteServer }) =>
+      createViteServer({
+        server: {
+          middlewareMode: true,
+          hmr: false,
+          ws: false,
+          watch: null,
+        },
+        appType: 'spa',
+      })
+    );
+
+    viteReadyPromise
+      .then((vite) => {
+        viteServer = vite;
+      })
+      .catch((err) => {
+        console.error('Failed to initialize Vite dev middleware:', err);
+        process.exit(1);
+      });
+
+    app.use(async (req, res, next) => {
+      try {
+        const vite = viteServer ?? (await viteReadyPromise);
+        return vite.middlewares(req, res, next);
+      } catch (err) {
+        next(err);
+      }
     });
-    app.use(vite.middlewares);
   }
 
   const server = app.listen(PORT, '0.0.0.0', () => {
@@ -76,7 +102,19 @@ async function startServer() {
 
   server.on('error', (err: any) => {
     console.error('Express server listen error:', err);
+    process.exit(1);
   });
+
+  const shutdown = async () => {
+    server.close();
+    if (viteServer) {
+      await viteServer.close().catch(() => {});
+    }
+    process.exit(0);
+  };
+
+  process.once('SIGINT', shutdown);
+  process.once('SIGTERM', shutdown);
 }
 
 startServer().catch((err) => {

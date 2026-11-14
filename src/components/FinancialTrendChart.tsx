@@ -1,7 +1,8 @@
-import React, { useState, useMemo, useRef, useEffect } from 'react';
-import { TrendingUp } from 'lucide-react';
+import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react';
+import { TrendingUp, ChevronLeft, ChevronRight, RotateCcw, MoveHorizontal } from 'lucide-react';
 import { DigitalTransaction, StoreExpense, Sale, ServiceSoftwareOrder } from '../types/index.ts';
 import { getStoredSales, getStoredServiceOrders } from '../utils/transactionSync.ts';
+import { isHutangTransaction } from '../services/accountBalanceService.ts';
 
 export type GranularityType = 'daily' | 'weekly' | 'monthly';
 
@@ -95,6 +96,19 @@ const MONTH_SHORT_ID = [
   'Jul', 'Agu', 'Sep', 'Okt', 'Nov', 'Des'
 ];
 
+function parseLocalYMDDate(ymd: string): Date {
+  const m = ymd?.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (m) {
+    return new Date(parseInt(m[1], 10), parseInt(m[2], 10) - 1, parseInt(m[3], 10));
+  }
+  const d = new Date(ymd);
+  return isNaN(d.getTime()) ? new Date() : d;
+}
+
+function toLocalYMDString(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
 export const FinancialTrendChart: React.FC<FinancialTrendChartProps> = ({
   allDigitalTransactions,
   periodType,
@@ -109,30 +123,98 @@ export const FinancialTrendChart: React.FC<FinancialTrendChartProps> = ({
     return 'daily';
   });
 
-  // Keep granularity in sync when periodType changes
+  // Offset per granularity for panning/shifting dates on the chart
+  const [dayOffset, setDayOffset] = useState<number>(0);
+  const [monthOffset, setMonthOffset] = useState<number>(0);
+  const [yearOffset, setYearOffset] = useState<number>(0);
+  const [isDragging, setIsDragging] = useState<boolean>(false);
+
+  // Keep granularity in sync when periodType changes and reset offsets when parent period filter changes
   useEffect(() => {
     if (periodType === 'yearly' || periodType === 'all') {
       setGranularity('monthly');
     } else {
       setGranularity('daily');
     }
+    setDayOffset(0);
+    setMonthOffset(0);
+    setYearOffset(0);
   }, [periodType]);
+
+  useEffect(() => {
+    setDayOffset(0);
+  }, [selectedDate]);
+
+  useEffect(() => {
+    setDayOffset(0);
+    setMonthOffset(0);
+  }, [selectedMonth]);
+
+  useEffect(() => {
+    setDayOffset(0);
+    setMonthOffset(0);
+    setYearOffset(0);
+  }, [selectedYear]);
 
   const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
   const svgRef = useRef<SVGSVGElement | null>(null);
+  const dragStateRef = useRef<{
+    active: boolean;
+    pointerId: number | null;
+    startX: number;
+    lastStepX: number;
+    moved: boolean;
+  }>({
+    active: false,
+    pointerId: null,
+    startX: 0,
+    lastStepX: 0,
+    moved: false,
+  });
+  const wheelAccumRef = useRef<number>(0);
+
+  const shiftPeriod = useCallback(
+    (delta: number) => {
+      if (delta === 0) return;
+      if (granularity === 'daily') {
+        setDayOffset((prev) => prev + delta);
+      } else if (granularity === 'weekly') {
+        setMonthOffset((prev) => prev + delta);
+      } else {
+        setYearOffset((prev) => prev + delta);
+      }
+    },
+    [granularity]
+  );
+
+  const activeOffset =
+    granularity === 'daily'
+      ? dayOffset
+      : granularity === 'weekly'
+      ? monthOffset
+      : yearOffset;
+
+  const handleResetOffset = () => {
+    if (granularity === 'daily') setDayOffset(0);
+    else if (granularity === 'weekly') setMonthOffset(0);
+    else setYearOffset(0);
+  };
 
   // Load legacy POS Sales & Service Orders if present
   const storedSales = useMemo(() => getStoredSales(), [allDigitalTransactions]);
   const storedServices = useMemo(() => getStoredServiceOrders(), [allDigitalTransactions]);
 
   // Construct Time Series Buckets (Fee only)
-  const seriesData: DataPoint[] = useMemo(() => {
+  const { seriesData, activeRangeLabel } = useMemo(() => {
     const buckets: DataPoint[] = [];
 
     const parseYMD = (dateStr?: string) => {
       if (!dateStr) return null;
       try {
-        const d = new Date(dateStr);
+        const bareMatch = dateStr.trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
+        const d = bareMatch
+          ? new Date(parseInt(bareMatch[1], 10), parseInt(bareMatch[2], 10) - 1, parseInt(bareMatch[3], 10))
+          : new Date(dateStr);
         if (isNaN(d.getTime())) return null;
         return {
           year: d.getFullYear(),
@@ -147,17 +229,19 @@ export const FinancialTrendChart: React.FC<FinancialTrendChartProps> = ({
 
     const addDigitalTx = (b: DataPoint, tx: DigitalTransaction) => {
       const isInternal = isInternalTransferTx(tx);
-      const adminFee = Number(tx.adminStoreFee) || 0;
-      const bankCost = Number(tx.adminBankCost) || 0;
-      const rawFee =
-        tx.profit != null && !Number.isNaN(Number(tx.profit))
-          ? Number(tx.profit)
-          : adminFee - bankCost;
-      const fee =
-        isInternal && rawFee === 0 && adminFee === 0 && bankCost > 0
-          ? -bankCost
-          : rawFee;
-      b.fee += fee;
+      if (!isHutangTransaction(tx)) {
+        const adminFee = Number(tx.adminStoreFee) || 0;
+        const bankCost = Number(tx.adminBankCost) || 0;
+        const rawFee =
+          tx.profit != null && !Number.isNaN(Number(tx.profit))
+            ? Number(tx.profit)
+            : adminFee - bankCost;
+        const fee =
+          isInternal && rawFee === 0 && adminFee === 0 && bankCost > 0
+            ? -bankCost
+            : rawFee;
+        b.fee += fee;
+      }
       if (!isInternal) {
         b.trxCount += 1;
       }
@@ -175,13 +259,19 @@ export const FinancialTrendChart: React.FC<FinancialTrendChartProps> = ({
       b.trxCount += 1;
     };
 
+    const todayISO = toLocalYMDString(new Date());
+    let rangeLabel = '';
+
     if (granularity === 'monthly') {
+      const targetYear = selectedYear + yearOffset;
+      rangeLabel = `Tahun ${targetYear}`;
+
       for (let m = 1; m <= 12; m++) {
         buckets.push({
-          id: `month-${m}`,
+          id: `month-${targetYear}-${m}`,
           label: MONTH_NAMES_ID[m - 1],
           shortLabel: MONTH_SHORT_ID[m - 1],
-          fullDateLabel: `${MONTH_NAMES_ID[m - 1]} ${selectedYear}`,
+          fullDateLabel: `${MONTH_NAMES_ID[m - 1]} ${targetYear}`,
           fee: 0,
           trxCount: 0,
         });
@@ -189,36 +279,40 @@ export const FinancialTrendChart: React.FC<FinancialTrendChartProps> = ({
 
       for (const tx of allDigitalTransactions) {
         const p = parseYMD(tx.createdAt);
-        if (!p || p.year !== selectedYear) continue;
+        if (!p || p.year !== targetYear) continue;
         const b = buckets[p.month - 1];
         if (b) addDigitalTx(b, tx);
       }
 
       for (const s of storedSales) {
         const p = parseYMD(s.createdAt);
-        if (!p || p.year !== selectedYear) continue;
+        if (!p || p.year !== targetYear) continue;
         const b = buckets[p.month - 1];
         if (b) addSale(b, s);
       }
 
       for (const s of storedServices) {
         const p = parseYMD(s.completedAt || s.receivedAt);
-        if (!p || p.year !== selectedYear) continue;
+        if (!p || p.year !== targetYear) continue;
         const b = buckets[p.month - 1];
         if (b) addService(b, s);
       }
     } else if (granularity === 'weekly') {
-      const daysInMonth = new Date(selectedYear, selectedMonth, 0).getDate();
+      const shiftedMonthAnchor = new Date(selectedYear, selectedMonth - 1 + monthOffset, 1);
+      const targetYear = shiftedMonthAnchor.getFullYear();
+      const targetMonth = shiftedMonthAnchor.getMonth() + 1;
+      const daysInMonth = new Date(targetYear, targetMonth, 0).getDate();
       const weekCount = Math.ceil(daysInMonth / 7);
+      rangeLabel = `${MONTH_NAMES_ID[targetMonth - 1]} ${targetYear}`;
 
       for (let w = 1; w <= weekCount; w++) {
         const startDay = (w - 1) * 7 + 1;
         const endDay = Math.min(w * 7, daysInMonth);
         buckets.push({
-          id: `week-${w}`,
+          id: `week-${targetYear}-${targetMonth}-${w}`,
           label: `Minggu ${w}`,
           shortLabel: `M${w}`,
-          fullDateLabel: `Minggu ke-${w} (${startDay}-${endDay} ${MONTH_SHORT_ID[selectedMonth - 1]} ${selectedYear})`,
+          fullDateLabel: `Minggu ke-${w} (${startDay}-${endDay} ${MONTH_SHORT_ID[targetMonth - 1]} ${targetYear})`,
           fee: 0,
           trxCount: 0,
         });
@@ -228,30 +322,28 @@ export const FinancialTrendChart: React.FC<FinancialTrendChartProps> = ({
 
       for (const tx of allDigitalTransactions) {
         const p = parseYMD(tx.createdAt);
-        if (!p || p.year !== selectedYear || p.month !== selectedMonth) continue;
+        if (!p || p.year !== targetYear || p.month !== targetMonth) continue;
         const b = buckets[getWeekIdx(p.day)];
         if (b) addDigitalTx(b, tx);
       }
 
       for (const s of storedSales) {
         const p = parseYMD(s.createdAt);
-        if (!p || p.year !== selectedYear || p.month !== selectedMonth) continue;
+        if (!p || p.year !== targetYear || p.month !== targetMonth) continue;
         const b = buckets[getWeekIdx(p.day)];
         if (b) addSale(b, s);
       }
 
       for (const s of storedServices) {
         const p = parseYMD(s.completedAt || s.receivedAt);
-        if (!p || p.year !== selectedYear || p.month !== selectedMonth) continue;
+        if (!p || p.year !== targetYear || p.month !== targetMonth) continue;
         const b = buckets[getWeekIdx(p.day)];
         if (b) addService(b, s);
       }
     } else {
       if (periodType === 'daily') {
-        const base = new Date(selectedDate);
-        if (isNaN(base.getTime())) {
-          base.setTime(Date.now());
-        }
+        const base = parseLocalYMDDate(selectedDate);
+        base.setDate(base.getDate() + dayOffset);
 
         for (let i = 6; i >= 0; i--) {
           const target = new Date(base);
@@ -260,7 +352,7 @@ export const FinancialTrendChart: React.FC<FinancialTrendChartProps> = ({
           const m = target.getMonth() + 1;
           const d = target.getDate();
           const iso = `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
-          const isToday = i === 0;
+          const isToday = iso === todayISO;
 
           buckets.push({
             id: iso,
@@ -277,66 +369,72 @@ export const FinancialTrendChart: React.FC<FinancialTrendChartProps> = ({
           });
         }
 
-        const bucketMap = new Map(buckets.map((b) => [b.id, b]));
-
-        for (const tx of allDigitalTransactions) {
-          const p = parseYMD(tx.createdAt);
-          if (!p) continue;
-          const b = bucketMap.get(p.isoDate);
-          if (b) addDigitalTx(b, tx);
-        }
-
-        for (const s of storedSales) {
-          const p = parseYMD(s.createdAt);
-          if (!p) continue;
-          const b = bucketMap.get(p.isoDate);
-          if (b) addSale(b, s);
-        }
-
-        for (const s of storedServices) {
-          const p = parseYMD(s.completedAt || s.receivedAt);
-          if (!p) continue;
-          const b = bucketMap.get(p.isoDate);
-          if (b) addService(b, s);
-        }
+        const firstDate = new Date(base);
+        firstDate.setDate(firstDate.getDate() - 6);
+        const sameMonth =
+          firstDate.getMonth() === base.getMonth() &&
+          firstDate.getFullYear() === base.getFullYear();
+        rangeLabel = sameMonth
+          ? `${firstDate.getDate()}–${base.getDate()} ${MONTH_SHORT_ID[base.getMonth()]} ${base.getFullYear()}`
+          : `${firstDate.getDate()} ${MONTH_SHORT_ID[firstDate.getMonth()]}–${base.getDate()} ${MONTH_SHORT_ID[base.getMonth()]} ${base.getFullYear()}`;
       } else {
         const daysInMonth = new Date(selectedYear, selectedMonth, 0).getDate();
-        for (let d = 1; d <= daysInMonth; d++) {
-          const iso = `${selectedYear}-${String(selectedMonth).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+        const startAnchor = new Date(selectedYear, selectedMonth - 1, 1 + dayOffset);
+        const endAnchor = new Date(startAnchor);
+        endAnchor.setDate(endAnchor.getDate() + daysInMonth - 1);
+
+        for (let i = 0; i < daysInMonth; i++) {
+          const target = new Date(startAnchor);
+          target.setDate(target.getDate() + i);
+          const y = target.getFullYear();
+          const m = target.getMonth() + 1;
+          const d = target.getDate();
+          const iso = `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+          const isCrossMonth = dayOffset !== 0;
+
           buckets.push({
             id: iso,
-            label: `Tgl ${d}`,
-            shortLabel: `${d}`,
-            fullDateLabel: `${d} ${MONTH_NAMES_ID[selectedMonth - 1]} ${selectedYear}`,
+            label: isCrossMonth ? `${d} ${MONTH_SHORT_ID[m - 1]}` : `Tgl ${d}`,
+            shortLabel: isCrossMonth ? `${d}/${m}` : `${d}`,
+            fullDateLabel: `${d} ${MONTH_NAMES_ID[m - 1]} ${y}`,
             fee: 0,
             trxCount: 0,
           });
         }
 
-        for (const tx of allDigitalTransactions) {
-          const p = parseYMD(tx.createdAt);
-          if (!p || p.year !== selectedYear || p.month !== selectedMonth) continue;
-          const b = buckets[p.day - 1];
-          if (b) addDigitalTx(b, tx);
-        }
+        const sameMonth =
+          startAnchor.getMonth() === endAnchor.getMonth() &&
+          startAnchor.getFullYear() === endAnchor.getFullYear();
+        rangeLabel = sameMonth
+          ? `${MONTH_NAMES_ID[startAnchor.getMonth()]} ${startAnchor.getFullYear()}`
+          : `${startAnchor.getDate()} ${MONTH_SHORT_ID[startAnchor.getMonth()]}–${endAnchor.getDate()} ${MONTH_SHORT_ID[endAnchor.getMonth()]} ${endAnchor.getFullYear()}`;
+      }
 
-        for (const s of storedSales) {
-          const p = parseYMD(s.createdAt);
-          if (!p || p.year !== selectedYear || p.month !== selectedMonth) continue;
-          const b = buckets[p.day - 1];
-          if (b) addSale(b, s);
-        }
+      const bucketMap = new Map(buckets.map((b) => [b.id, b]));
 
-        for (const s of storedServices) {
-          const p = parseYMD(s.completedAt || s.receivedAt);
-          if (!p || p.year !== selectedYear || p.month !== selectedMonth) continue;
-          const b = buckets[p.day - 1];
-          if (b) addService(b, s);
-        }
+      for (const tx of allDigitalTransactions) {
+        const p = parseYMD(tx.createdAt);
+        if (!p) continue;
+        const b = bucketMap.get(p.isoDate);
+        if (b) addDigitalTx(b, tx);
+      }
+
+      for (const s of storedSales) {
+        const p = parseYMD(s.createdAt);
+        if (!p) continue;
+        const b = bucketMap.get(p.isoDate);
+        if (b) addSale(b, s);
+      }
+
+      for (const s of storedServices) {
+        const p = parseYMD(s.completedAt || s.receivedAt);
+        if (!p) continue;
+        const b = bucketMap.get(p.isoDate);
+        if (b) addService(b, s);
       }
     }
 
-    return buckets;
+    return { seriesData: buckets, activeRangeLabel: rangeLabel };
   }, [
     allDigitalTransactions,
     storedSales,
@@ -346,6 +444,9 @@ export const FinancialTrendChart: React.FC<FinancialTrendChartProps> = ({
     selectedMonth,
     selectedYear,
     selectedDate,
+    dayOffset,
+    monthOffset,
+    yearOffset,
   ]);
 
   // Aggregate Fee stats across the displayed series
@@ -439,21 +540,98 @@ export const FinancialTrendChart: React.FC<FinancialTrendChartProps> = ({
     setHoveredIndex(closestIdx);
   };
 
-  const handleMouseMove = (e: React.MouseEvent<SVGSVGElement>) => {
-    updateHoveredFromClientX(e.clientX);
+  const handlePointerDown = (e: React.PointerEvent<SVGSVGElement>) => {
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    dragStateRef.current = {
+      active: true,
+      pointerId: e.pointerId,
+      startX: e.clientX,
+      lastStepX: e.clientX,
+      moved: false,
+    };
+    try {
+      e.currentTarget.setPointerCapture(e.pointerId);
+    } catch {
+      // ignore
+    }
   };
 
-  const handleTouchMove = (e: React.TouchEvent<SVGSVGElement>) => {
-    if (e.touches.length > 0) {
-      updateHoveredFromClientX(e.touches[0].clientX);
+  const handlePointerMove = (e: React.PointerEvent<SVGSVGElement>) => {
+    const drag = dragStateRef.current;
+    if (drag.active) {
+      const dxSinceStart = e.clientX - drag.startX;
+      if (!drag.moved && Math.abs(dxSinceStart) > 5) {
+        drag.moved = true;
+        setIsDragging(true);
+        setHoveredIndex(null);
+      }
+
+      if (drag.moved) {
+        const stepPx = granularity === 'daily' ? 42 : granularity === 'weekly' ? 85 : 105;
+        const dxFromLastStep = e.clientX - drag.lastStepX;
+        const steps = Math.trunc(dxFromLastStep / stepPx);
+        if (steps !== 0) {
+          drag.lastStepX += steps * stepPx;
+          shiftPeriod(-steps);
+        }
+        return;
+      }
+    }
+
+    if (e.pointerType !== 'touch') {
+      updateHoveredFromClientX(e.clientX);
+    }
+  };
+
+  const handlePointerUpOrCancel = (e: React.PointerEvent<SVGSVGElement>) => {
+    const drag = dragStateRef.current;
+    if (!drag.active) return;
+
+    if (e.pointerType === 'touch' && !drag.moved) {
+      updateHoveredFromClientX(e.clientX);
+    }
+
+    drag.active = false;
+    drag.moved = false;
+    drag.pointerId = null;
+    setIsDragging(false);
+
+    try {
+      if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+        e.currentTarget.releasePointerCapture(e.pointerId);
+      }
+    } catch {
+      // ignore
+    }
+  };
+
+  const handleWheelPan = (e: React.WheelEvent<HTMLDivElement>) => {
+    const horizontalDelta =
+      Math.abs(e.deltaX) > Math.abs(e.deltaY)
+        ? e.deltaX
+        : e.shiftKey
+        ? e.deltaY
+        : 0;
+
+    if (Math.abs(horizontalDelta) < 2) return;
+
+    wheelAccumRef.current += horizontalDelta;
+    const threshold = 48;
+    const steps = Math.trunc(wheelAccumRef.current / threshold);
+    if (steps !== 0) {
+      wheelAccumRef.current -= steps * threshold;
+      shiftPeriod(steps);
+      setHoveredIndex(null);
     }
   };
 
   const handleMouseLeave = () => {
-    setHoveredIndex(null);
+    if (!dragStateRef.current.active) {
+      setHoveredIndex(null);
+    }
   };
 
-  const activeHoveredPoint = hoveredIndex !== null ? points[hoveredIndex] : null;
+  const activeHoveredPoint = !isDragging && hoveredIndex !== null ? points[hoveredIndex] : null;
 
   const formatSignedFee = (val: number) => {
     const n = Math.round(Number(val) || 0);
@@ -464,8 +642,8 @@ export const FinancialTrendChart: React.FC<FinancialTrendChartProps> = ({
 
   return (
     <div className="bg-white rounded-2xl border border-slate-200 shadow-xs p-5 sm:p-6 space-y-5">
-      {/* Header Card: Title & Granularity Switcher */}
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-4 border-b border-slate-100">
+      {/* Header Card: Title, Date Pan Controls & Granularity Switcher */}
+      <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 pb-4 border-b border-slate-100">
         <div>
           <div className="flex items-center gap-2">
             <span className="p-2 rounded-xl bg-emerald-50 text-emerald-600">
@@ -480,41 +658,94 @@ export const FinancialTrendChart: React.FC<FinancialTrendChartProps> = ({
           </p>
         </div>
 
-        {/* Granularity Switcher */}
-        <div className="flex items-center p-1 bg-slate-100/90 rounded-xl border border-slate-200/80 text-xs self-start md:self-auto">
-          <button
-            type="button"
-            onClick={() => setGranularity('daily')}
-            className={`px-3 py-1.5 rounded-lg font-semibold transition-colors cursor-pointer ${
-              granularity === 'daily'
-                ? 'bg-white text-emerald-700 shadow-xs'
-                : 'text-slate-600 hover:text-slate-900'
-            }`}
-          >
-            Harian
-          </button>
-          <button
-            type="button"
-            onClick={() => setGranularity('weekly')}
-            className={`px-3 py-1.5 rounded-lg font-semibold transition-colors cursor-pointer ${
-              granularity === 'weekly'
-                ? 'bg-white text-emerald-700 shadow-xs'
-                : 'text-slate-600 hover:text-slate-900'
-            }`}
-          >
-            Mingguan
-          </button>
-          <button
-            type="button"
-            onClick={() => setGranularity('monthly')}
-            className={`px-3 py-1.5 rounded-lg font-semibold transition-colors cursor-pointer ${
-              granularity === 'monthly'
-                ? 'bg-white text-emerald-700 shadow-xs'
-                : 'text-slate-600 hover:text-slate-900'
-            }`}
-          >
-            Bulanan
-          </button>
+        <div className="flex flex-wrap items-center gap-2 self-start lg:self-auto">
+          {/* Date Shift / Pan Controls */}
+          <div className="flex items-center gap-1 bg-slate-50 border border-slate-200/90 rounded-xl p-1 text-xs">
+            <button
+              type="button"
+              onClick={() => shiftPeriod(-1)}
+              title={
+                granularity === 'daily'
+                  ? 'Geser 1 hari sebelumnya'
+                  : granularity === 'weekly'
+                  ? 'Bulan sebelumnya'
+                  : 'Tahun sebelumnya'
+              }
+              className="p-1.5 rounded-lg text-slate-600 hover:text-emerald-700 hover:bg-white hover:shadow-2xs transition-colors cursor-pointer"
+              aria-label="Geser periode sebelumnya"
+            >
+              <ChevronLeft className="w-3.5 h-3.5" />
+            </button>
+
+            <span className="px-2 text-[11px] font-bold text-slate-700 whitespace-nowrap select-none">
+              {activeRangeLabel}
+            </span>
+
+            <button
+              type="button"
+              onClick={() => shiftPeriod(1)}
+              title={
+                granularity === 'daily'
+                  ? 'Geser 1 hari berikutnya'
+                  : granularity === 'weekly'
+                  ? 'Bulan berikutnya'
+                  : 'Tahun berikutnya'
+              }
+              className="p-1.5 rounded-lg text-slate-600 hover:text-emerald-700 hover:bg-white hover:shadow-2xs transition-colors cursor-pointer"
+              aria-label="Geser periode berikutnya"
+            >
+              <ChevronRight className="w-3.5 h-3.5" />
+            </button>
+
+            {activeOffset !== 0 && (
+              <button
+                type="button"
+                onClick={handleResetOffset}
+                title="Kembali ke tanggal awal"
+                className="ml-0.5 px-2 py-1 rounded-lg bg-emerald-50 hover:bg-emerald-100 text-emerald-700 text-[11px] font-bold inline-flex items-center gap-1 transition-colors cursor-pointer"
+              >
+                <RotateCcw className="w-3 h-3" />
+                <span>Reset</span>
+              </button>
+            )}
+          </div>
+
+          {/* Granularity Switcher */}
+          <div className="flex items-center p-1 bg-slate-100/90 rounded-xl border border-slate-200/80 text-xs">
+            <button
+              type="button"
+              onClick={() => setGranularity('daily')}
+              className={`px-3 py-1.5 rounded-lg font-semibold transition-colors cursor-pointer ${
+                granularity === 'daily'
+                  ? 'bg-white text-emerald-700 shadow-xs'
+                  : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              Harian
+            </button>
+            <button
+              type="button"
+              onClick={() => setGranularity('weekly')}
+              className={`px-3 py-1.5 rounded-lg font-semibold transition-colors cursor-pointer ${
+                granularity === 'weekly'
+                  ? 'bg-white text-emerald-700 shadow-xs'
+                  : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              Mingguan
+            </button>
+            <button
+              type="button"
+              onClick={() => setGranularity('monthly')}
+              className={`px-3 py-1.5 rounded-lg font-semibold transition-colors cursor-pointer ${
+                granularity === 'monthly'
+                  ? 'bg-white text-emerald-700 shadow-xs'
+                  : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              Bulanan
+            </button>
+          </div>
         </div>
       </div>
 
@@ -600,7 +831,10 @@ export const FinancialTrendChart: React.FC<FinancialTrendChartProps> = ({
       </div>
 
       {/* Interactive SVG Chart Container */}
-      <div className="relative w-full overflow-hidden bg-slate-50/50 rounded-xl border border-slate-100 p-2 sm:p-4 select-none">
+      <div
+        onWheel={handleWheelPan}
+        className="relative w-full overflow-hidden bg-slate-50/50 rounded-xl border border-slate-100 p-2 sm:p-4 select-none"
+      >
         {/* Tooltip Float Overlay */}
         {activeHoveredPoint && (
           <div
@@ -642,10 +876,13 @@ export const FinancialTrendChart: React.FC<FinancialTrendChartProps> = ({
         <svg
           ref={svgRef}
           viewBox={`0 0 ${width} ${height}`}
-          className="w-full h-56 sm:h-64 cursor-crosshair overflow-visible"
-          onMouseMove={handleMouseMove}
-          onTouchStart={handleTouchMove}
-          onTouchMove={handleTouchMove}
+          className={`w-full h-56 sm:h-64 overflow-visible touch-pan-y ${
+            isDragging ? 'cursor-grabbing' : 'cursor-grab'
+          }`}
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
+          onPointerUp={handlePointerUpOrCancel}
+          onPointerCancel={handlePointerUpOrCancel}
           onMouseLeave={handleMouseLeave}
         >
           <defs>
@@ -770,14 +1007,15 @@ export const FinancialTrendChart: React.FC<FinancialTrendChartProps> = ({
       </div>
 
       {/* Chart Legend Footer */}
-      <div className="flex flex-wrap items-center justify-between text-xs text-slate-500 pt-1">
+      <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500 pt-1">
         <div className="flex items-center gap-1.5">
           <span className="w-3 h-1 rounded-full bg-emerald-600 inline-block" />
           <span className="font-medium text-slate-700">Fee Admin Toko (Margin)</span>
         </div>
 
-        <div className="text-[11px] text-slate-400 mt-2 sm:mt-0">
-          Arahkan kursor / sentuh titik diagram untuk melihat detail fee
+        <div className="text-[11px] text-slate-400 inline-flex items-center gap-1.5">
+          <MoveHorizontal className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+          <span>Seret / geser grafik ke kiri-kanan untuk pindah tanggal, atau arahkan kursor untuk detail fee</span>
         </div>
       </div>
     </div>

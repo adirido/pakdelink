@@ -5,6 +5,7 @@ import {
   AccountBalances,
   FUND_SOURCES_CONFIG,
   calculateAllBalancesTotal,
+  isHutangTransaction,
 } from '../services/accountBalanceService.ts';
 
 export interface FinancialReportExportParams {
@@ -45,6 +46,7 @@ interface ReportTxRow {
   marginFee: number;
   operator: string;
   isInternal: boolean;
+  isHutang: boolean;
 }
 
 const DEFAULT_STORE_NAME = 'Agen BRI Pakde Link';
@@ -191,6 +193,7 @@ function buildReportRows(
   let totalMarginFee = 0;
 
   const rows: ReportTxRow[] = inRange.map((tx) => {
+    const isHutang = isHutangTransaction(tx);
     const { category, categoryLabel, isInternal } = classifyTransaction(tx);
     const nominal = Math.max(0, Number(tx.nominal) || 0);
     const adminStoreFee = Math.max(0, Number(tx.adminStoreFee) || 0);
@@ -200,10 +203,11 @@ function buildReportRows(
       tx.profit != null && !Number.isNaN(Number(tx.profit))
         ? Number(tx.profit)
         : adminStoreFee - adminBankCost;
-    const marginFee =
-      isInternal && rawMarginFee === 0 && adminStoreFee === 0 && adminBankCost > 0
-        ? -adminBankCost
-        : rawMarginFee;
+    const marginFee = isHutang
+      ? 0
+      : isInternal && rawMarginFee === 0 && adminStoreFee === 0 && adminBankCost > 0
+      ? -adminBankCost
+      : rawMarginFee;
 
     const rawCust = (tx.customerName || '').trim();
     const hasCust =
@@ -225,7 +229,9 @@ function buildReportRows(
       totalNominal += nominal;
       totalBayar += totalPaid;
     }
-    totalMarginFee += marginFee;
+    if (!isHutang) {
+      totalMarginFee += marginFee;
+    }
 
     return {
       id: tx.id,
@@ -244,6 +250,7 @@ function buildReportRows(
       marginFee,
       operator: resolvedOperator,
       isInternal,
+      isHutang,
     };
   });
 
@@ -516,7 +523,9 @@ function exportFinancialPdf(params: FinancialReportExportParams) {
           ? `${formatRupiah(r.nominal)}\nAdmin: ${formatRupiah(r.adminStoreFee)}`
           : formatRupiah(r.nominal),
         r.isInternal ? '-' : formatRupiah(r.totalBayar),
-        r.isInternal && r.marginFee === 0
+        r.isHutang
+          ? 'Rp 0\nHutang (Tertunda)'
+          : r.isInternal && r.marginFee === 0
           ? '-'
           : !r.isInternal && r.adminBankCost > 0
           ? `${formatSignedRupiah(r.marginFee)}\nModal: ${formatRupiah(r.adminBankCost)}`
@@ -751,8 +760,31 @@ function exportFinancialPdf(params: FinancialReportExportParams) {
           doc.text(`Admin: ${formatRupiah(r.adminStoreFee)}`, rightX, cell.y + 8.6, { align: 'right' });
         }
       } else if (column.index === 5) {
-        // MARGIN FEE (Emerald / Rose Badge + Modal Bank subtext if any)
-        if (r.isInternal && r.marginFee === 0) {
+        // MARGIN FEE (Emerald / Rose / Amber Hutang Badge + Modal Bank subtext if any)
+        if (r.isHutang) {
+          const feeText = formatRupiah(0);
+          doc.setFont('helvetica', 'bold');
+          doc.setFontSize(6.6);
+          const pillW = Math.min(maxW, doc.getTextWidth(feeText) + 3.2);
+          drawPill(
+            doc,
+            feeText,
+            rightX - pillW,
+            cell.y + 1.8,
+            4.3,
+            6.6,
+            [255, 251, 235],
+            [253, 230, 138],
+            [180, 83, 9],
+            maxW
+          );
+          doc.setFont('helvetica', 'normal');
+          doc.setFontSize(5.6);
+          doc.setTextColor(225, 29, 72);
+          doc.text('Hutang (Tertunda)', rightX, cell.y + 9.4, {
+            align: 'right',
+          });
+        } else if (r.isInternal && r.marginFee === 0) {
           doc.setFont('helvetica', 'normal');
           doc.setFontSize(7.0);
           doc.setTextColor(148, 163, 184);
@@ -966,12 +998,13 @@ function exportFinancialCsv(params: FinancialReportExportParams) {
           ? `${formatRupiah(r.nominal)} (Admin: ${formatRupiah(r.adminStoreFee)})`
           : formatRupiah(r.nominal);
       const totalBayarCol = r.isInternal ? '-' : formatRupiah(r.totalBayar);
-      const marginCol =
-        r.isInternal && r.marginFee === 0
-          ? '-'
-          : !r.isInternal && r.adminBankCost > 0
-          ? `${formatSignedRupiah(r.marginFee)} (Modal: ${formatRupiah(r.adminBankCost)})`
-          : formatSignedRupiah(r.marginFee);
+      const marginCol = r.isHutang
+        ? 'Rp 0 (Hutang - Tertunda)'
+        : r.isInternal && r.marginFee === 0
+        ? '-'
+        : !r.isInternal && r.adminBankCost > 0
+        ? `${formatSignedRupiah(r.marginFee)} (Modal: ${formatRupiah(r.adminBankCost)})`
+        : formatSignedRupiah(r.marginFee);
 
       lines.push(
         [

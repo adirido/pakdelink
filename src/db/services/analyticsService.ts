@@ -245,10 +245,18 @@ export async function getFinancialSummary(
       const notes = (d.notes || '').toLowerCase();
       const prov = (d.provider || '').toLowerCase();
       const cust = (d.customerName || '').toLowerCase();
+      const isHutang =
+        (d.paymentMethod || '').trim().toLowerCase() === 'hutang' ||
+        (d.status || '').trim().toLowerCase() === 'hutang';
       const nominal = Number(d.nominal || 0);
       const storeFee = Number(d.adminStoreFee || 0);
+      const bankCost = Number(d.adminBankCost || 0);
       const paid = Number(d.totalCustomerPaid || (nominal + storeFee));
-      const prof = Number(d.profit != null ? d.profit : storeFee);
+      const rawProf =
+        d.profit != null && !Number.isNaN(Number(d.profit))
+          ? Number(d.profit)
+          : storeFee - bankCost;
+      const prof = isHutang ? 0 : rawProf;
 
       // Akumulasi SEMUA transaksi card ke total perputaran uang (omset bruto):
       omsetDigi += (paid > 0 ? paid : nominal + storeFee);

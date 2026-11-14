@@ -28,6 +28,7 @@ import {
   ChevronDown,
   Filter,
   Users,
+  Download,
 } from 'lucide-react';
 import { Sale, DigitalTransaction, ServiceSoftwareOrder } from '../types/index.ts';
 import { useAuth } from '../context/AuthContext.tsx';
@@ -73,6 +74,7 @@ export interface UnifiedTransactionItem {
   categoryLabel: string;
   invoiceNumber: string;
   timestamp: number;
+  dateYMD: string;
   dateFormatted: string;
   customerName: string;
   targetAccount: string;
@@ -85,6 +87,7 @@ export interface UnifiedTransactionItem {
   adminBankCost: number;
   totalAmount: number;
   profit: number;
+  realizedProfit: number;
   statusText: string;
   isHutang: boolean;
   statusVariant: 'emerald' | 'blue' | 'amber' | 'purple' | 'slate';
@@ -95,6 +98,20 @@ export interface UnifiedTransactionItem {
   rawSale?: Sale;
   rawService?: ServiceSoftwareOrder;
 }
+
+export type DateFilterMode = 'all' | 'today' | 'single' | 'range';
+
+const getLocalYMD = (input: Date | string | number = new Date()): string => {
+  if (typeof input === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(input.trim())) {
+    return input.trim();
+  }
+  const d = input instanceof Date ? input : new Date(input);
+  if (isNaN(d.getTime())) return '';
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+};
 
 interface SalesHistoryModuleProps {
   onReprintSale?: (sale: Sale) => void;
@@ -109,9 +126,14 @@ export const SalesHistoryModule: React.FC<SalesHistoryModuleProps> = ({
 }) => {
   const { currentRole } = useAuth();
   const isOwner = currentRole === 'owner';
+  const todayYMD = getLocalYMD(new Date());
 
   // State Filter & Search
   const [activeCategory, setActiveCategory] = useState<DigitalCategoryFilter>('all');
+  const [dateFilterMode, setDateFilterMode] = useState<DateFilterMode>('all');
+  const [selectedDate, setSelectedDate] = useState<string>(todayYMD);
+  const [startDate, setStartDate] = useState<string>(todayYMD);
+  const [endDate, setEndDate] = useState<string>(todayYMD);
   const [search, setSearch] = useState('');
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -252,6 +274,30 @@ export const SalesHistoryModule: React.FC<SalesHistoryModuleProps> = ({
     }
   };
 
+  const handleDateModeChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
+    const nextMode = e.target.value as DateFilterMode;
+    const currentScrollY = typeof window !== 'undefined' ? window.scrollY : 0;
+    setDateFilterMode(nextMode);
+    if (nextMode === 'single' && !selectedDate) {
+      setSelectedDate(getLocalYMD(new Date()));
+    } else if (nextMode === 'range') {
+      const fallback = getLocalYMD(new Date());
+      if (!startDate) setStartDate(fallback);
+      if (!endDate) setEndDate(fallback);
+    }
+    if (typeof window !== 'undefined') {
+      requestAnimationFrame(() => {
+        if (Math.abs(window.scrollY - currentScrollY) > 2) {
+          window.scrollTo({ top: currentScrollY, behavior: 'instant' as ScrollBehavior });
+        }
+      });
+    }
+  };
+
+  const handleResetDateFilter = () => {
+    setDateFilterMode('all');
+  };
+
   // Convert raw records into categorized items
   const unifiedTransactions = useMemo<UnifiedTransactionItem[]>(() => {
     const list: UnifiedTransactionItem[] = [];
@@ -367,6 +413,9 @@ export const SalesHistoryModule: React.FC<SalesHistoryModuleProps> = ({
           ? -adminBankCostNum
           : rawProfit;
 
+      const isHutang = isHutangTransaction(d);
+      const realizedProfit = isHutang ? 0 : profit;
+
       const resolvedOperator =
         d.operatorName ||
         (d.notes?.match(/\[Operator:\s*([^\]]+)\]/i)?.[1]?.trim()) ||
@@ -383,6 +432,7 @@ export const SalesHistoryModule: React.FC<SalesHistoryModuleProps> = ({
         categoryLabel,
         invoiceNumber: d.referenceNumber,
         timestamp: date.getTime() || 0,
+        dateYMD: getLocalYMD(date),
         dateFormatted: date.toLocaleString('id-ID', {
           day: '2-digit',
           month: 'short',
@@ -401,8 +451,9 @@ export const SalesHistoryModule: React.FC<SalesHistoryModuleProps> = ({
         adminBankCost: Number(d.adminBankCost || 0),
         totalAmount: totalPaid,
         profit: profit,
-        isHutang: isHutangTransaction(d),
-        statusText: isHutangTransaction(d) ? 'Hutang' : d.status === 'success' ? 'Lunas' : d.status || 'Lunas',
+        realizedProfit,
+        isHutang,
+        statusText: isHutang ? 'Hutang' : d.status === 'success' ? 'Lunas' : d.status || 'Lunas',
         statusVariant,
         fundSource: d.fundSource || (d.notes?.match(/\[Sumber(?:\s*Dana)?:\s*([^\]]+)\]/i)?.[1]?.trim()) || undefined,
         operatorName: resolvedOperator,
@@ -419,6 +470,37 @@ export const SalesHistoryModule: React.FC<SalesHistoryModuleProps> = ({
     return list.sort((a, b) => b.timestamp - a.timestamp);
   }, [digitalList]);
 
+  // Date-filtered transactions (diterapkan sebelum counts & category agar angka kategori sinkron dengan tanggal terpilih)
+  const dateFilteredTransactions = useMemo(() => {
+    if (dateFilterMode === 'all') return unifiedTransactions;
+
+    const currentToday = getLocalYMD(new Date());
+
+    if (dateFilterMode === 'today') {
+      return unifiedTransactions.filter((tx) => tx.dateYMD === currentToday);
+    }
+
+    if (dateFilterMode === 'single') {
+      if (!selectedDate) return unifiedTransactions;
+      return unifiedTransactions.filter((tx) => tx.dateYMD === selectedDate);
+    }
+
+    // dateFilterMode === 'range'
+    const hasStart = Boolean(startDate);
+    const hasEnd = Boolean(endDate);
+    if (!hasStart && !hasEnd) return unifiedTransactions;
+
+    const effStart = hasStart && hasEnd ? (startDate <= endDate ? startDate : endDate) : startDate;
+    const effEnd = hasStart && hasEnd ? (startDate <= endDate ? endDate : startDate) : endDate;
+
+    return unifiedTransactions.filter((tx) => {
+      if (!tx.dateYMD) return false;
+      if (effStart && tx.dateYMD < effStart) return false;
+      if (effEnd && tx.dateYMD > effEnd) return false;
+      return true;
+    });
+  }, [unifiedTransactions, dateFilterMode, selectedDate, startDate, endDate]);
+
   // Counts for Category Badges
   const counts = useMemo(() => {
     let transfer = 0;
@@ -431,7 +513,7 @@ export const SalesHistoryModule: React.FC<SalesHistoryModuleProps> = ({
     let bank_mutation = 0;
     let hutang = 0;
 
-    unifiedTransactions.forEach((tx) => {
+    dateFilteredTransactions.forEach((tx) => {
       if (tx.digitalCategory === 'transfer') transfer++;
       else if (tx.digitalCategory === 'tarik_tunai') tarik_tunai++;
       else if (tx.digitalCategory === 'ewallet') ewallet++;
@@ -445,7 +527,7 @@ export const SalesHistoryModule: React.FC<SalesHistoryModuleProps> = ({
     });
 
     return {
-      all: unifiedTransactions.length,
+      all: dateFilteredTransactions.length,
       transfer,
       tarik_tunai,
       ewallet,
@@ -456,12 +538,12 @@ export const SalesHistoryModule: React.FC<SalesHistoryModuleProps> = ({
       bank_mutation,
       hutang,
     };
-  }, [unifiedTransactions]);
+  }, [dateFilteredTransactions]);
 
-  // Filtered list based on category & search query
+  // Filtered list based on date, category & search query
   const filteredTransactions = useMemo(() => {
     const q = search.trim().toLowerCase();
-    return unifiedTransactions.filter((item) => {
+    return dateFilteredTransactions.filter((item) => {
       // Category / Status filter
       if (activeCategory === 'hutang') {
         if (!item.isHutang) return false;
@@ -484,7 +566,7 @@ export const SalesHistoryModule: React.FC<SalesHistoryModuleProps> = ({
         item.statusText.toLowerCase().includes(q)
       );
     });
-  }, [unifiedTransactions, activeCategory, search]);
+  }, [dateFilteredTransactions, activeCategory, search]);
 
   // Quick KPI calculation (pada tab 'all', mutasi internal & titipan tidak ikut menggandakan volume/omset pelanggan,
   // namun biaya admin bank dari mutasi internal tetap diperhitungkan pada Margin Fee / Profit)
@@ -506,7 +588,7 @@ export const SalesHistoryModule: React.FC<SalesHistoryModuleProps> = ({
         );
     const totalVolume = kpiSource.reduce((acc, curr) => acc + curr.nominal, 0);
     const totalTurnover = kpiSource.reduce((acc, curr) => acc + curr.totalAmount, 0);
-    const totalProfit = filteredTransactions.reduce((acc, curr) => acc + curr.profit, 0);
+    const totalProfit = filteredTransactions.reduce((acc, curr) => acc + curr.realizedProfit, 0);
     return { totalTransactions, totalVolume, totalTurnover, totalProfit };
   }, [filteredTransactions, activeCategory]);
 
@@ -602,6 +684,154 @@ export const SalesHistoryModule: React.FC<SalesHistoryModuleProps> = ({
     } finally {
       setDeleting(false);
     }
+  };
+
+  // Export filtered transactions in selected date range to UTF-8 CSV
+  const handleExportRangeCSV = () => {
+    if (filteredTransactions.length === 0) return;
+
+    const escapeCsvCell = (value: string | number | undefined | null): string => {
+      const str = value === null || value === undefined ? '' : String(value);
+      if (/[",\n\r]/.test(str)) {
+        return `"${str.replace(/"/g, '""')}"`;
+      }
+      return str;
+    };
+
+    const hasStart = Boolean(startDate);
+    const hasEnd = Boolean(endDate);
+    const effStart = hasStart && hasEnd ? (startDate <= endDate ? startDate : endDate) : startDate || todayYMD;
+    const effEnd = hasStart && hasEnd ? (startDate <= endDate ? endDate : startDate) : endDate || todayYMD;
+    const periodLabel = effStart === effEnd ? effStart : `${effStart} s/d ${effEnd}`;
+
+    const categoryLabelMap: Record<DigitalCategoryFilter, string> = {
+      all: 'Semua Transaksi',
+      transfer: 'Transfer Bank',
+      tarik_tunai: 'Tarik Tunai',
+      ewallet: 'Top Up E-Wallet',
+      ppob: 'PPOB dan Lainnya',
+      transfer_card: 'Transfer Antar Card',
+      tagihan: 'Tagihan',
+      titipan: 'Transaksi Titipan',
+      bank_mutation: 'Potongan & Bunga Bank',
+      hutang: 'Hutang',
+    };
+
+    const downloadedAt = new Date().toLocaleString('id-ID', {
+      day: '2-digit',
+      month: 'short',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+
+    const lines: string[] = [];
+    lines.push([escapeCsvCell('LAPORAN RIWAYAT TRANSAKSI AGEN DIGITAL')].join(','));
+    lines.push([escapeCsvCell('Periode Rentang Tanggal'), escapeCsvCell(periodLabel)].join(','));
+    lines.push([escapeCsvCell('Kategori'), escapeCsvCell(categoryLabelMap[activeCategory] || 'Semua Transaksi')].join(','));
+    if (search.trim()) {
+      lines.push([escapeCsvCell('Kata Kunci Pencarian'), escapeCsvCell(search.trim())].join(','));
+    }
+    lines.push([escapeCsvCell('Waktu Unduh'), escapeCsvCell(downloadedAt)].join(','));
+    lines.push([escapeCsvCell('Total Transaksi'), escapeCsvCell(`${summaryKPI.totalTransactions} Struk`)].join(','));
+    lines.push([escapeCsvCell('Volume Nominal Uang'), escapeCsvCell(formatRupiah(summaryKPI.totalVolume))].join(','));
+    lines.push([escapeCsvCell('Total Uang Diterima'), escapeCsvCell(formatRupiah(summaryKPI.totalTurnover))].join(','));
+    lines.push([escapeCsvCell('Fee Admin Toko (Profit)'), escapeCsvCell(formatSignedRupiah(summaryKPI.totalProfit))].join(','));
+    lines.push('');
+
+    lines.push(
+      [
+        'No. Reff',
+        'Waktu Transaksi',
+        'Kategori',
+        'Provider / Bank',
+        'Sumber Dana',
+        'No. Tujuan',
+        'Nama Pelanggan',
+        'Metode Bayar',
+        'Nominal Trx',
+        'Admin Jasa Toko',
+        'Total Bayar',
+        'Margin Fee (Profit)',
+        'Modal Bank',
+        'Status',
+        'Operator',
+        'Catatan',
+      ]
+        .map(escapeCsvCell)
+        .join(',')
+    );
+
+    filteredTransactions.forEach((item) => {
+      const isInternal =
+        item.digitalCategory === 'transfer_card' ||
+        item.digitalCategory === 'tagihan' ||
+        item.digitalCategory === 'titipan' ||
+        item.digitalCategory === 'bank_mutation';
+
+      const totalBayarCol = isInternal ? '-' : formatRupiah(item.totalAmount);
+      const marginCol = item.isHutang
+        ? 'Rp 0 (Hutang - Tertunda)'
+        : isInternal && item.realizedProfit === 0
+        ? '-'
+        : formatSignedRupiah(item.realizedProfit);
+      const modalCol = item.adminBankCost > 0 ? formatRupiah(item.adminBankCost) : '-';
+      const statusCol = item.isHutang ? 'Hutang (Tertunda)' : item.statusText;
+
+      lines.push(
+        [
+          escapeCsvCell(item.invoiceNumber),
+          escapeCsvCell(item.dateFormatted),
+          escapeCsvCell(item.categoryLabel),
+          escapeCsvCell(item.provider),
+          escapeCsvCell(item.fundSource || '-'),
+          escapeCsvCell(item.targetAccount || '-'),
+          escapeCsvCell(item.customerName || '-'),
+          escapeCsvCell(item.paymentMethod || '-'),
+          escapeCsvCell(formatRupiah(item.nominal)),
+          escapeCsvCell(item.adminStoreFee > 0 ? formatRupiah(item.adminStoreFee) : '-'),
+          escapeCsvCell(totalBayarCol),
+          escapeCsvCell(marginCol),
+          escapeCsvCell(modalCol),
+          escapeCsvCell(statusCol),
+          escapeCsvCell(item.operatorName || '-'),
+          escapeCsvCell((item.notes || '').replace(/\s+/g, ' ').trim() || '-'),
+        ].join(',')
+      );
+    });
+
+    lines.push(
+      [
+        escapeCsvCell(`TOTAL (${summaryKPI.totalTransactions} TRANSAKSI)`),
+        escapeCsvCell('-'),
+        escapeCsvCell('-'),
+        escapeCsvCell('-'),
+        escapeCsvCell('-'),
+        escapeCsvCell('-'),
+        escapeCsvCell('-'),
+        escapeCsvCell('-'),
+        escapeCsvCell(formatRupiah(summaryKPI.totalVolume)),
+        escapeCsvCell('-'),
+        escapeCsvCell(formatRupiah(summaryKPI.totalTurnover)),
+        escapeCsvCell(formatSignedRupiah(summaryKPI.totalProfit)),
+        escapeCsvCell('-'),
+        escapeCsvCell('-'),
+        escapeCsvCell('-'),
+        escapeCsvCell('-'),
+      ].join(',')
+    );
+
+    const csvContent = '\uFEFF' + lines.join('\n');
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    const safePeriod = effStart === effEnd ? effStart : `${effStart}_sd_${effEnd}`;
+    link.setAttribute('href', url);
+    link.setAttribute('download', `Riwayat_Transaksi_${safePeriod}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
   };
 
   return (
@@ -714,52 +944,138 @@ export const SalesHistoryModule: React.FC<SalesHistoryModuleProps> = ({
           </div>
         </div>
 
-        {/* Filter Tabs & Search Bar */}
-        <div className="flex flex-col lg:flex-row items-stretch lg:items-center justify-between gap-2.5 pt-2 border-t border-slate-100">
-          {/* Dropdown Filter Kategori Transaksi (Lebar terkunci agar tidak bergeser saat pilihan berubah) */}
-          <div className="relative w-full lg:w-[272px] shrink-0 inline-flex items-center h-[38px] bg-white hover:bg-slate-50 border border-slate-200 hover:border-slate-300 focus-within:border-indigo-600 focus-within:ring-2 focus-within:ring-indigo-500/20 rounded-xl shadow-2xs transition-colors duration-150">
-            <div className="absolute left-3 pointer-events-none flex items-center text-indigo-600">
-              <Filter className="w-3.5 h-3.5" />
+        {/* Filter Tabs, Date Filter & Search Bar */}
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-1.5 pt-2 border-t border-slate-100">
+          <div className="flex flex-wrap lg:flex-nowrap items-center gap-1.5 min-w-0">
+            {/* Dropdown Filter Kategori Transaksi */}
+            <div className="relative w-full sm:w-[185px] xl:w-[205px] shrink-0 inline-flex items-center h-[32px] bg-white hover:bg-slate-50 border border-slate-200 hover:border-slate-300 focus-within:border-indigo-600 focus-within:ring-2 focus-within:ring-indigo-500/20 rounded-lg shadow-2xs transition-colors duration-150">
+              <div className="absolute left-2.5 pointer-events-none flex items-center text-indigo-600">
+                <Filter className="w-3 h-3" />
+              </div>
+              <select
+                value={activeCategory}
+                onChange={handleCategoryChange}
+                aria-label="Filter kategori transaksi"
+                className="w-full h-full pl-7 pr-6 py-1 bg-transparent text-[11px] font-bold text-slate-800 outline-none cursor-pointer appearance-none border-none ring-0 truncate"
+              >
+                <option value="all">Semua Transaksi ({counts.all})</option>
+                <option value="transfer">Transfer Bank ({counts.transfer})</option>
+                <option value="tarik_tunai">Tarik Tunai ({counts.tarik_tunai})</option>
+                <option value="ewallet">Top Up E-Wallet ({counts.ewallet})</option>
+                <option value="ppob">PPOB dan Lainnya ({counts.ppob})</option>
+                <option value="transfer_card">Transfer Antar Card ({counts.transfer_card})</option>
+                <option value="tagihan">Tagihan ({counts.tagihan})</option>
+                <option value="titipan">Transaksi Titipan ({counts.titipan})</option>
+                <option value="bank_mutation">Potongan & Bunga Bank ({counts.bank_mutation})</option>
+                <option value="hutang">Hutang ({counts.hutang})</option>
+              </select>
+              <div className="absolute right-2 pointer-events-none flex items-center text-slate-400">
+                <ChevronDown className="w-3 h-3" />
+              </div>
             </div>
-            <select
-              value={activeCategory}
-              onChange={handleCategoryChange}
-              aria-label="Filter kategori transaksi"
-              className="w-full h-full pl-8.5 pr-8 py-2 bg-transparent text-xs font-bold text-slate-800 outline-none cursor-pointer appearance-none border-none ring-0 truncate"
-            >
-              <option value="all">Semua Transaksi ({counts.all})</option>
-              <option value="transfer">Transfer Bank ({counts.transfer})</option>
-              <option value="tarik_tunai">Tarik Tunai ({counts.tarik_tunai})</option>
-              <option value="ewallet">Top Up E-Wallet ({counts.ewallet})</option>
-              <option value="ppob">PPOB dan Lainnya ({counts.ppob})</option>
-              <option value="transfer_card">Transfer Antar Card ({counts.transfer_card})</option>
-              <option value="tagihan">Tagihan ({counts.tagihan})</option>
-              <option value="titipan">Transaksi Titipan ({counts.titipan})</option>
-              <option value="bank_mutation">Potongan & Bunga Bank ({counts.bank_mutation})</option>
-              <option value="hutang">Hutang ({counts.hutang})</option>
-            </select>
-            <div className="absolute right-2.5 pointer-events-none flex items-center text-slate-400">
-              <ChevronDown className="w-3.5 h-3.5" />
+
+            {/* Filter Tanggal */}
+            <div className="flex flex-wrap lg:flex-nowrap items-center gap-1.5 min-w-0">
+              <div className="relative w-full sm:w-[136px] xl:w-[145px] shrink-0 inline-flex items-center h-[32px] bg-white hover:bg-slate-50 border border-slate-200 hover:border-slate-300 focus-within:border-indigo-600 focus-within:ring-2 focus-within:ring-indigo-500/20 rounded-lg shadow-2xs transition-colors duration-150">
+                <div className="absolute left-2.5 pointer-events-none flex items-center text-indigo-600">
+                  <Calendar className="w-3 h-3" />
+                </div>
+                <select
+                  value={dateFilterMode}
+                  onChange={handleDateModeChange}
+                  aria-label="Filter tanggal transaksi"
+                  className="w-full h-full pl-7 pr-6 py-1 bg-transparent text-[11px] font-bold text-slate-800 outline-none cursor-pointer appearance-none border-none ring-0 truncate"
+                >
+                  <option value="all">Semua Tanggal</option>
+                  <option value="today">Hari Ini</option>
+                  <option value="single">Pilih Tanggal</option>
+                  <option value="range">Rentang Tanggal</option>
+                </select>
+                <div className="absolute right-2 pointer-events-none flex items-center text-slate-400">
+                  <ChevronDown className="w-3 h-3" />
+                </div>
+              </div>
+
+              {dateFilterMode === 'single' && (
+                <div className="flex items-center h-[32px] px-2 rounded-lg bg-slate-50 border border-slate-200 focus-within:border-indigo-600 focus-within:ring-2 focus-within:ring-indigo-500/20 focus-within:bg-white transition-colors shrink-0">
+                  <input
+                    type="date"
+                    value={selectedDate}
+                    onChange={(e) => setSelectedDate(e.target.value)}
+                    aria-label="Tanggal transaksi"
+                    className="w-[106px] bg-transparent text-[11px] font-bold text-slate-800 outline-none cursor-pointer"
+                  />
+                </div>
+              )}
+
+              {dateFilterMode === 'range' && (
+                <div className="flex items-center gap-1 h-[32px] px-2 rounded-lg bg-slate-50 border border-slate-200 focus-within:border-indigo-600 focus-within:ring-2 focus-within:ring-indigo-500/20 focus-within:bg-white transition-colors shrink-0">
+                  <input
+                    type="date"
+                    value={startDate}
+                    onChange={(e) => setStartDate(e.target.value)}
+                    aria-label="Dari tanggal"
+                    className="w-[102px] xl:w-[110px] bg-transparent text-[11px] font-bold text-slate-800 outline-none cursor-pointer"
+                  />
+                  <span className="text-[10px] font-semibold text-slate-400 shrink-0">s/d</span>
+                  <input
+                    type="date"
+                    value={endDate}
+                    onChange={(e) => setEndDate(e.target.value)}
+                    aria-label="Sampai tanggal"
+                    className="w-[102px] xl:w-[110px] bg-transparent text-[11px] font-bold text-slate-800 outline-none cursor-pointer"
+                  />
+                </div>
+              )}
+
+              {dateFilterMode !== 'all' && (
+                <button
+                  type="button"
+                  onClick={handleResetDateFilter}
+                  title="Tampilkan semua tanggal"
+                  className="h-[32px] px-2 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-600 hover:text-slate-900 text-[11px] font-semibold inline-flex items-center gap-1 transition-colors cursor-pointer shrink-0 whitespace-nowrap"
+                >
+                  <X className="w-3 h-3" />
+                  <span>Reset</span>
+                </button>
+              )}
+
+              {dateFilterMode === 'range' && (
+                <button
+                  type="button"
+                  onClick={handleExportRangeCSV}
+                  disabled={filteredTransactions.length === 0}
+                  title={
+                    filteredTransactions.length === 0
+                      ? 'Tidak ada transaksi pada rentang tanggal ini untuk diunduh'
+                      : 'Unduh riwayat transaksi rentang tanggal dalam format CSV'
+                  }
+                  className="h-[32px] px-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 disabled:bg-slate-200 disabled:text-slate-400 text-white text-[11px] font-bold inline-flex items-center gap-1 shadow-2xs transition-colors cursor-pointer disabled:cursor-not-allowed shrink-0 whitespace-nowrap"
+                >
+                  <Download className="w-3 h-3" />
+                  <span>Unduh CSV</span>
+                </button>
+              )}
             </div>
           </div>
 
           {/* Search Input */}
-          <div className="relative w-full lg:w-64 xl:w-72 shrink-0">
-            <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+          <div className="relative w-full lg:w-[175px] xl:w-[215px] 2xl:w-[250px] shrink-0">
+            <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
             <input
               type="text"
-              placeholder="Cari No Reff, nama, rekening/no HP..."
+              placeholder="Cari Reff, nama, no HP..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              className="w-full h-[38px] pl-9 pr-8 py-2 text-xs rounded-xl bg-slate-50 border border-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:bg-white text-slate-800 font-medium placeholder:text-slate-400"
+              className="w-full h-[32px] pl-7.5 pr-7 py-1 text-[11px] rounded-lg bg-slate-50 border border-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:bg-white text-slate-800 font-medium placeholder:text-slate-400"
             />
             {search && (
               <button
                 type="button"
                 onClick={() => setSearch('')}
-                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 cursor-pointer"
+                className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 cursor-pointer"
               >
-                <X className="w-3.5 h-3.5" />
+                <X className="w-3 h-3" />
               </button>
             )}
           </div>
@@ -783,6 +1099,8 @@ export const SalesHistoryModule: React.FC<SalesHistoryModuleProps> = ({
             <p className="text-xs text-slate-400 max-w-sm mx-auto">
               {search
                 ? `Tidak ditemukan transaksi dengan kata kunci "${search}".`
+                : dateFilterMode !== 'all'
+                ? 'Tidak ditemukan transaksi pada tanggal yang dipilih. Ubah atau reset filter tanggal untuk melihat riwayat lainnya.'
                 : 'Belum ada transaksi pada filter ini. Transaksi yang dicatat di Agen Digital akan otomatis tersimpan di sini.'}
             </p>
           </div>
@@ -987,7 +1305,16 @@ export const SalesHistoryModule: React.FC<SalesHistoryModuleProps> = ({
 
                         {/* 6. Margin Fee */}
                         <td className="px-3.5 py-3 text-right overflow-hidden align-middle whitespace-nowrap tabular-nums">
-                          {isInternalMutasi && item.profit === 0 ? (
+                          {item.isHutang ? (
+                            <div className="inline-flex flex-col items-end max-w-full">
+                              <span className="font-bold px-1.5 py-0.5 rounded border max-w-full truncate text-amber-700 bg-amber-50 border-amber-200">
+                                {formatRupiah(0)}
+                              </span>
+                              <span className="text-[9.5px] text-rose-600 font-medium mt-0.5 truncate max-w-full">
+                                Tertunda (Hutang)
+                              </span>
+                            </div>
+                          ) : isInternalMutasi && item.profit === 0 ? (
                             <span className="text-slate-400 text-[11px]">-</span>
                           ) : (
                             <div className="inline-flex flex-col items-end max-w-full">
@@ -1157,14 +1484,21 @@ export const SalesHistoryModule: React.FC<SalesHistoryModuleProps> = ({
                         </div>
                       )}
                       {(!isInternalMutasi || item.profit !== 0) && (
-                        <div
-                          className={`flex justify-between font-bold ${
-                            item.profit < 0 ? 'text-rose-600' : 'text-emerald-700'
-                          }`}
-                        >
-                          <span>Margin Fee:</span>
-                          <span>{formatSignedRupiah(item.profit)}</span>
-                        </div>
+                        item.isHutang ? (
+                          <div className="flex justify-between font-bold text-amber-700">
+                            <span>Margin Fee:</span>
+                            <span>{formatRupiah(0)} (Tertunda)</span>
+                          </div>
+                        ) : (
+                          <div
+                            className={`flex justify-between font-bold ${
+                              item.profit < 0 ? 'text-rose-600' : 'text-emerald-700'
+                            }`}
+                          >
+                            <span>Margin Fee:</span>
+                            <span>{formatSignedRupiah(item.profit)}</span>
+                          </div>
+                        )
                       )}
                       {!isInternalMutasi && item.adminBankCost > 0 && (
                         <div className="flex justify-between text-rose-600 text-[11px]">
@@ -1376,16 +1710,28 @@ export const SalesHistoryModule: React.FC<SalesHistoryModuleProps> = ({
                     </span>
                   </div>
 
-                  <div
-                    className={`p-2 rounded-lg border flex justify-between items-center font-bold ${
-                      selectedTransaction.profit < 0
-                        ? 'bg-rose-50 border-rose-200 text-rose-800'
-                        : 'bg-emerald-50 border-emerald-100 text-emerald-800'
-                    }`}
-                  >
-                    <span>Keuntungan Bersih Toko (Margin Fee):</span>
-                    <span className="text-sm">{formatSignedRupiah(selectedTransaction.profit)}</span>
-                  </div>
+                  {selectedTransaction.isHutang ? (
+                    <div className="p-2.5 rounded-lg border bg-amber-50 border-amber-200 text-amber-800 space-y-0.5">
+                      <div className="flex justify-between items-center font-bold">
+                        <span>Keuntungan Bersih Toko (Margin Fee):</span>
+                        <span className="text-sm">{formatRupiah(0)}</span>
+                      </div>
+                      <div className="text-[10px] text-amber-700">
+                        Fee {formatSignedRupiah(selectedTransaction.profit)} belum masuk ke total profit karena transaksi masih berstatus Hutang.
+                      </div>
+                    </div>
+                  ) : (
+                    <div
+                      className={`p-2 rounded-lg border flex justify-between items-center font-bold ${
+                        selectedTransaction.profit < 0
+                          ? 'bg-rose-50 border-rose-200 text-rose-800'
+                          : 'bg-emerald-50 border-emerald-100 text-emerald-800'
+                      }`}
+                    >
+                      <span>Keuntungan Bersih Toko (Margin Fee):</span>
+                      <span className="text-sm">{formatSignedRupiah(selectedTransaction.profit)}</span>
+                    </div>
+                  )}
                 </div>
               </div>
             </div>

@@ -42,6 +42,7 @@ import {
   getStoredTagihanNote,
   saveStoredTagihanNote,
   onAccountBalancesUpdated,
+  isHutangTransaction,
 } from '../services/accountBalanceService.ts';
 import {
   subscribeDigitalTransactionsCloud,
@@ -723,7 +724,10 @@ export const AnalyticsModule: React.FC = () => {
   }, [periodPureTransferBankTransactions]);
 
   const pureTransferBankProfit = React.useMemo(() => {
-    return periodPureTransferBankTransactions.reduce((acc, cur) => acc + (Number(cur.profit) || 0), 0);
+    return periodPureTransferBankTransactions.reduce(
+      (acc, cur) => acc + (isHutangTransaction(cur) ? 0 : (Number(cur.profit) || 0)),
+      0
+    );
   }, [periodPureTransferBankTransactions]);
 
   // Data riwayat transaksi PPOB & Lainnya pada periode aktif (Semua transaksi PPOB dan Lainnya, bukan Card Tagihan)
@@ -740,7 +744,13 @@ export const AnalyticsModule: React.FC = () => {
 
   const ppobRealProfit = React.useMemo(() => {
     return periodPpobTransactions.reduce(
-      (acc, cur) => acc + (cur.profit != null ? Number(cur.profit) : (Number(cur.adminStoreFee) || 0)),
+      (acc, cur) =>
+        acc +
+        (isHutangTransaction(cur)
+          ? 0
+          : cur.profit != null
+          ? Number(cur.profit)
+          : (Number(cur.adminStoreFee) || 0)),
       0
     );
   }, [periodPpobTransactions]);
@@ -815,7 +825,11 @@ export const AnalyticsModule: React.FC = () => {
     csv += `ID,Tanggal & Waktu,No. Reff / SN,Layanan / Divisi,Provider / Bank,Nomor / Rekening Tujuan,Nama Pelanggan,Nominal Transaksi (Volume),Biaya Bank/Modal,Fee Admin Toko,Laba Bersih,Metode Bayar,Sumber Dana,Status,Catatan\n`;
     for (const tx of items) {
       const cleanNotes = (tx.notes || '').replace(/[\r\n,]+/g, ' ');
-      csv += `${tx.id},"${tx.createdAt || ''}","${tx.referenceNumber || ''}","${tx.type}","${tx.provider}","${tx.targetAccount}","${tx.customerName || '-'}","${tx.nominal}","${tx.adminBankCost || 0}","${tx.adminStoreFee || 0}","${tx.profit || 0}","${tx.paymentMethod || 'cash'}","${tx.fundSource || '-'}","${tx.status || 'success'}","${cleanNotes}"\n`;
+      const txHutang = isHutangTransaction(tx);
+      const exportFee = txHutang ? 0 : (tx.adminStoreFee || 0);
+      const exportProfit = txHutang ? 0 : (tx.profit || 0);
+      const exportStatus = txHutang ? 'hutang' : (tx.status || 'success');
+      csv += `${tx.id},"${tx.createdAt || ''}","${tx.referenceNumber || ''}","${tx.type}","${tx.provider}","${tx.targetAccount}","${tx.customerName || '-'}","${tx.nominal}","${tx.adminBankCost || 0}","${exportFee}","${exportProfit}","${tx.paymentMethod || 'cash'}","${tx.fundSource || '-'}","${exportStatus}","${cleanNotes}"\n`;
     }
 
     const safeFilename = `${cfg.title.replace(/[\s\/\\]+/g, '_')}_${activePeriodLabel.replace(/[\s\(\)\/]+/g, '_')}_${Date.now()}`;
@@ -832,8 +846,14 @@ export const AnalyticsModule: React.FC = () => {
   // Active division modal items & stats
   const activeDivisionItems = selectedDivisionModal ? getDivisionTransactions(selectedDivisionModal) : [];
   const divisionTotalVolume = activeDivisionItems.reduce((acc, curr) => acc + (Number(curr.nominal) || 0), 0);
-  const divisionTotalFee = activeDivisionItems.reduce((acc, curr) => acc + (Number(curr.adminStoreFee) || 0), 0);
-  const divisionTotalProfit = activeDivisionItems.reduce((acc, curr) => acc + (Number(curr.profit) || 0), 0);
+  const divisionTotalFee = activeDivisionItems.reduce(
+    (acc, curr) => acc + (isHutangTransaction(curr) ? 0 : (Number(curr.adminStoreFee) || 0)),
+    0
+  );
+  const divisionTotalProfit = activeDivisionItems.reduce(
+    (acc, curr) => acc + (isHutangTransaction(curr) ? 0 : (Number(curr.profit) || 0)),
+    0
+  );
 
   // Helper identifikasi transaksi Transfer Antar Card (TF Card)
   const isTransferCardTransactionHelper = (tx: DigitalTransaction): boolean => {
@@ -921,13 +941,15 @@ export const AnalyticsModule: React.FC = () => {
     for (const tx of periodAllDigitalTransactions) {
       const vol = Number(tx.totalCustomerPaid) || ((Number(tx.nominal) || 0) + (Number(tx.adminStoreFee) || 0));
       volume += vol;
-      const adminFee = Number(tx.adminStoreFee) || 0;
-      const bankCost = Number(tx.adminBankCost) || 0;
-      const profit =
-        tx.profit != null && !Number.isNaN(Number(tx.profit))
-          ? Number(tx.profit)
-          : adminFee - bankCost;
-      feeProfit += profit;
+      if (!isHutangTransaction(tx)) {
+        const adminFee = Number(tx.adminStoreFee) || 0;
+        const bankCost = Number(tx.adminBankCost) || 0;
+        const profit =
+          tx.profit != null && !Number.isNaN(Number(tx.profit))
+            ? Number(tx.profit)
+            : adminFee - bankCost;
+        feeProfit += profit;
+      }
     }
     return { volume, feeProfit, count: periodAllDigitalTransactions.length };
   }, [periodAllDigitalTransactions]);
@@ -1990,7 +2012,9 @@ export const AnalyticsModule: React.FC = () => {
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-slate-100">
-                          {activeDivisionItems.map((tx, idx) => (
+                          {activeDivisionItems.map((tx, idx) => {
+                            const txHutang = isHutangTransaction(tx);
+                            return (
                             <tr key={`${tx.referenceNumber || 'tx'}-${tx.id || idx}-${idx}`} className="hover:bg-slate-50/60 transition">
                               <td className="py-3 px-3.5 text-slate-600 whitespace-nowrap">
                                 <div className="font-medium text-slate-800">{formatIndoDateTime(tx.createdAt)}</div>
@@ -2049,29 +2073,49 @@ export const AnalyticsModule: React.FC = () => {
                                 {formatRupiah(tx.nominal)}
                               </td>
 
-                              <td className="py-3 px-3.5 text-right font-semibold text-amber-700 whitespace-nowrap">
-                                +{formatRupiah(tx.adminStoreFee)}
+                              <td className="py-3 px-3.5 text-right font-semibold whitespace-nowrap">
+                                {txHutang ? (
+                                  <span className="text-amber-700">{formatRupiah(0)}</span>
+                                ) : (
+                                  <span className="text-amber-700">+{formatRupiah(tx.adminStoreFee)}</span>
+                                )}
                               </td>
 
-                              <td className="py-3 px-3.5 text-right font-bold text-emerald-700 whitespace-nowrap">
-                                +{formatRupiah(tx.profit)}
+                              <td className="py-3 px-3.5 text-right font-bold whitespace-nowrap">
+                                {txHutang ? (
+                                  <div className="inline-flex flex-col items-end">
+                                    <span className="text-amber-700">{formatRupiah(0)}</span>
+                                    <span className="text-[9.5px] font-medium text-rose-600">Tertunda (Hutang)</span>
+                                  </div>
+                                ) : (
+                                  <span className="text-emerald-700">+{formatRupiah(tx.profit)}</span>
+                                )}
                               </td>
 
                               <td className="py-3 px-3.5 text-center whitespace-nowrap">
-                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">
-                                  <CheckCircle2 className="w-3 h-3" />
-                                  <span>Berhasil</span>
-                                </span>
+                                {txHutang ? (
+                                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-rose-50 text-rose-700 border border-rose-200">
+                                    <Clock className="w-3 h-3" />
+                                    <span>Hutang</span>
+                                  </span>
+                                ) : (
+                                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">
+                                    <CheckCircle2 className="w-3 h-3" />
+                                    <span>Berhasil</span>
+                                  </span>
+                                )}
                               </td>
                             </tr>
-                          ))}
+                          );})}
                         </tbody>
                       </table>
                     </div>
 
                     {/* Mobile View: Cards */}
                     <div className="md:hidden space-y-3">
-                      {activeDivisionItems.map((tx, idx) => (
+                      {activeDivisionItems.map((tx, idx) => {
+                        const txHutang = isHutangTransaction(tx);
+                        return (
                         <div
                           key={`${tx.referenceNumber || 'tx'}-${tx.id || idx}-${idx}`}
                           className="bg-slate-50/70 p-3.5 rounded-2xl border border-slate-200 space-y-2.5"
@@ -2088,10 +2132,17 @@ export const AnalyticsModule: React.FC = () => {
                                 {formatIndoDateTime(tx.createdAt)}
                               </div>
                             </div>
-                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">
-                              <CheckCircle2 className="w-2.5 h-2.5" />
-                              <span>Berhasil</span>
-                            </span>
+                            {txHutang ? (
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-rose-50 text-rose-700 border border-rose-200">
+                                <Clock className="w-2.5 h-2.5" />
+                                <span>Hutang</span>
+                              </span>
+                            ) : (
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">
+                                <CheckCircle2 className="w-2.5 h-2.5" />
+                                <span>Berhasil</span>
+                              </span>
+                            )}
                           </div>
 
                           <div className="bg-white p-2.5 rounded-xl border border-slate-200/80 space-y-1.5 text-xs">
@@ -2137,18 +2188,18 @@ export const AnalyticsModule: React.FC = () => {
                             <div>
                               <div className="text-[10px] text-slate-500">Fee Toko</div>
                               <div className="text-xs font-bold text-amber-700 mt-0.5">
-                                +{formatRupiah(tx.adminStoreFee)}
+                                {txHutang ? formatRupiah(0) : `+${formatRupiah(tx.adminStoreFee)}`}
                               </div>
                             </div>
                             <div>
                               <div className="text-[10px] text-slate-500">Laba Bersih</div>
-                              <div className="text-xs font-bold text-emerald-700 mt-0.5">
-                                +{formatRupiah(tx.profit)}
+                              <div className={`text-xs font-bold mt-0.5 ${txHutang ? 'text-amber-700' : 'text-emerald-700'}`}>
+                                {txHutang ? 'Rp 0 (Hutang)' : `+${formatRupiah(tx.profit)}`}
                               </div>
                             </div>
                           </div>
                         </div>
-                      ))}
+                      );})}
                     </div>
                   </>
                 )}

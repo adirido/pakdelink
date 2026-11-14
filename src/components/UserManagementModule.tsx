@@ -19,7 +19,6 @@ import {
   Check,
 } from 'lucide-react';
 import { AppUser, UserRole } from '../types/index.ts';
-import { useAuth } from '../context/AuthContext.tsx';
 import {
   syncUserToFirestore,
   deleteUserFromFirestore,
@@ -36,7 +35,6 @@ import {
 } from '../utils/scrollLock.ts';
 
 export const UserManagementModule: React.FC = () => {
-  const { currentRole, switchRole } = useAuth();
   const [usersList, setUsersList] = useState<AppUser[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -418,57 +416,6 @@ export const UserManagementModule: React.FC = () => {
             Atur hak akses staf toko (Owner, Kepala Toko, Kasir, dan Teknisi) untuk melindungi privasi laba margin HPP dan keamanan operasional terminal POS.
           </p>
         </div>
-
-        {/* Live Simulator Role Switcher */}
-        <div className="flex items-center gap-2 p-2 rounded-xl bg-slate-100 border border-slate-200 text-xs">
-          <span className="text-slate-500 font-medium">Mode Simulasi:</span>
-          <select
-            value={currentRole}
-            onChange={(e) => switchRole(e.target.value as UserRole)}
-            className="font-bold text-xs bg-white py-1 px-2.5 rounded-lg border border-slate-300 text-indigo-700 focus:outline-none"
-          >
-            <option value="owner">👑 Owner (Akses Penuh)</option>
-            <option value="manager">👔 Kepala Toko</option>
-            <option value="cashier">🛒 Kasir (HPP Tersembunyi)</option>
-            <option value="technician">🔧 Teknisi Software</option>
-          </select>
-        </div>
-      </div>
-
-      {/* Role Cards Matrix */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        {(Object.keys(roleInfo) as UserRole[]).map((r) => {
-          const info = roleInfo[r];
-          const isCurrent = currentRole === r;
-          return (
-            <div
-              key={r}
-              className={`p-4 rounded-2xl border transition relative ${
-                isCurrent
-                  ? 'bg-indigo-50/50 border-indigo-400 ring-2 ring-indigo-500/20 shadow-xs'
-                  : 'bg-white border-slate-200'
-              }`}
-            >
-              <div className="flex items-center justify-between mb-2">
-                <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${info.badge}`}>
-                  {info.label}
-                </span>
-                {isCurrent && (
-                  <span className="text-[10px] font-bold text-indigo-700 bg-indigo-100 px-2 py-0.5 rounded-full">
-                    Aktif
-                  </span>
-                )}
-              </div>
-              <p className="text-xs text-slate-600 mt-2 leading-relaxed">{info.desc}</p>
-              <button
-                onClick={() => switchRole(r)}
-                className="mt-3 w-full py-1.5 rounded-lg text-xs font-semibold bg-slate-100 hover:bg-slate-200 text-slate-700 transition cursor-pointer"
-              >
-                Uji Coba Shift Sebagai Ini
-              </button>
-            </div>
-          );
-        })}
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
