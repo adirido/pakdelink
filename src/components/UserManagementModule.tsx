@@ -17,8 +17,13 @@ import {
   ShieldAlert,
   Save,
   Check,
+  Building2,
+  MapPin,
+  Phone,
+  Store,
 } from 'lucide-react';
-import { AppUser, UserRole } from '../types/index.ts';
+import { createPortal } from 'react-dom';
+import { AppUser, Branch, UserRole } from '../types/index.ts';
 import {
   syncUserToFirestore,
   deleteUserFromFirestore,
@@ -28,6 +33,16 @@ import {
   BUILTIN_FALLBACK_USERS,
 } from '../services/cloudUserService.ts';
 import {
+  DEFAULT_BRANCH_ID,
+  DEFAULT_PUSAT_BRANCH,
+  deleteBranchFromCloud,
+  fetchBranchesFromCloud,
+  normalizeBranchId,
+  sanitizeBranchId,
+  saveBranchToCloud,
+} from '../services/branchService.ts';
+import { useAuth } from '../context/AuthContext.tsx';
+import {
   useBodyScrollLock,
   handleBackdropTouchMove,
   handleBackdropWheel,
@@ -35,13 +50,20 @@ import {
 } from '../utils/scrollLock.ts';
 
 export const UserManagementModule: React.FC = () => {
+  const { branches: authBranches, activeBranchId, switchBranch } = useAuth();
   const [usersList, setUsersList] = useState<AppUser[]>([]);
+  const [branchesList, setBranchesList] = useState<Branch[]>(authBranches);
   const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    setBranchesList(authBranches);
+  }, [authBranches]);
 
   // Form State: Add Staff
   const [name, setName] = useState('');
   const [email, setEmail] = useState(''); // Menyimpan ID Karyawan
   const [role, setRole] = useState<UserRole>('cashier');
+  const [branchId, setBranchId] = useState<string>(DEFAULT_BRANCH_ID);
   const [pin, setPin] = useState(''); // Menyimpan Password
   const [submitting, setSubmitting] = useState(false);
   const [notification, setNotification] = useState<string | null>(null);
@@ -58,6 +80,7 @@ export const UserManagementModule: React.FC = () => {
   const [editEmployeeId, setEditEmployeeId] = useState('');
   const [editName, setEditName] = useState('');
   const [editRole, setEditRole] = useState<UserRole>('cashier');
+  const [editBranchId, setEditBranchId] = useState<string>(DEFAULT_BRANCH_ID);
   const [editPin, setEditPin] = useState('');
   const [showEditPin, setShowEditPin] = useState(false);
   const [savingEdit, setSavingEdit] = useState(false);
@@ -67,8 +90,30 @@ export const UserManagementModule: React.FC = () => {
   const [selectedUserForDelete, setSelectedUserForDelete] = useState<AppUser | null>(null);
   const [deletingUser, setDeletingUser] = useState(false);
 
+  // Modal: Add / Edit Branch
+  const [branchModalOpen, setBranchModalOpen] = useState(false);
+  const [editingBranch, setEditingBranch] = useState<Branch | null>(null);
+  const [branchIdInput, setBranchIdInput] = useState('');
+  const [branchNameInput, setBranchNameInput] = useState('');
+  const [branchReceiptNameInput, setBranchReceiptNameInput] = useState('');
+  const [branchReceiptCustomized, setBranchReceiptCustomized] = useState(false);
+  const [branchAddressInput, setBranchAddressInput] = useState(DEFAULT_PUSAT_BRANCH.address);
+  const [branchPhoneInput, setBranchPhoneInput] = useState(DEFAULT_PUSAT_BRANCH.phone);
+  const [branchActiveInput, setBranchActiveInput] = useState(true);
+  const [savingBranch, setSavingBranch] = useState(false);
+
+  // Modal: Confirm Delete Branch
+  const [deleteBranchTarget, setDeleteBranchTarget] = useState<Branch | null>(null);
+  const [deletingBranch, setDeletingBranch] = useState(false);
+
   // Lock body scroll whenever any modal in this module is active
-  useBodyScrollLock(pinModalOpen || editModalOpen || deleteModalOpen);
+  useBodyScrollLock(
+    pinModalOpen ||
+      editModalOpen ||
+      deleteModalOpen ||
+      branchModalOpen ||
+      deleteBranchTarget !== null
+  );
 
   // Toggle show/hide password in table
   const [showPins, setShowPins] = useState<Record<number, boolean>>({});
@@ -138,6 +183,7 @@ export const UserManagementModule: React.FC = () => {
 
     const cleanEmpId = email.trim();
     const cleanPassword = pin.trim();
+    const assignedBranchId = role === 'owner' ? DEFAULT_BRANCH_ID : normalizeBranchId(branchId);
     const duplicate = usersList.find(
       (u) => String(u.employeeId || u.email || '').trim().toLowerCase() === cleanEmpId.toLowerCase()
     );
@@ -155,6 +201,7 @@ export const UserManagementModule: React.FC = () => {
         email: cleanEmpId,
         name: name.trim(),
         role,
+        branchId: assignedBranchId,
         pin: cleanPassword,
         createdAt: new Date().toISOString(),
       };
@@ -171,6 +218,7 @@ export const UserManagementModule: React.FC = () => {
           email: cleanEmpId,
           name: name.trim(),
           role,
+          branchId: assignedBranchId,
           password: cleanPassword,
           pin: cleanPassword,
         }),
@@ -183,11 +231,124 @@ export const UserManagementModule: React.FC = () => {
       setName('');
       setEmail('');
       setPin('');
+      setBranchId(DEFAULT_BRANCH_ID);
       showToast('Berhasil menambahkan akun karyawan baru!');
     } catch (err: any) {
       showToast(err.message || 'Gagal menyimpan akun karyawan ke database');
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  const getBranchLabel = (targetBranchId?: string | null): string => {
+    const normalized = normalizeBranchId(targetBranchId);
+    const found = branchesList.find((b) => b.id === normalized);
+    return found ? found.name : normalized === DEFAULT_BRANCH_ID ? 'Pusat' : normalized;
+  };
+
+  const handleOpenCreateBranchModal = () => {
+    setEditingBranch(null);
+    setBranchNameInput('');
+    setBranchIdInput('');
+    setBranchReceiptNameInput('Agen BRI Pakde Link - ');
+    setBranchReceiptCustomized(false);
+    setBranchAddressInput('');
+    setBranchPhoneInput('WA: ');
+    setBranchActiveInput(true);
+    setBranchModalOpen(true);
+  };
+
+  const handleOpenEditBranchModal = (b: Branch) => {
+    setEditingBranch(b);
+    setBranchIdInput(b.id);
+    setBranchNameInput(b.name);
+    setBranchReceiptNameInput(b.receiptName);
+    setBranchReceiptCustomized(true);
+    setBranchAddressInput(b.address);
+    setBranchPhoneInput(b.phone);
+    setBranchActiveInput(b.id === DEFAULT_BRANCH_ID ? true : b.isActive !== false);
+    setBranchModalOpen(true);
+  };
+
+  const handleSaveBranch = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const cleanName = branchNameInput.trim();
+    if (!cleanName) {
+      showToast('Nama cabang wajib diisi');
+      return;
+    }
+
+    const generatedId = editingBranch
+      ? editingBranch.id
+      : sanitizeBranchId(branchIdInput.trim() || cleanName);
+
+    if (!editingBranch && branchesList.some((b) => b.id === generatedId)) {
+      showToast(`Kode cabang "${generatedId}" sudah digunakan. Silakan gunakan nama/kode lain.`);
+      return;
+    }
+
+    setSavingBranch(true);
+    try {
+      const saved = await saveBranchToCloud({
+        id: generatedId,
+        name: cleanName,
+        receiptName:
+          branchReceiptNameInput.trim() ||
+          (generatedId === DEFAULT_BRANCH_ID
+            ? DEFAULT_PUSAT_BRANCH.receiptName
+            : `Agen BRI Pakde Link - ${cleanName}`),
+        address: branchAddressInput.trim() || DEFAULT_PUSAT_BRANCH.address,
+        phone: branchPhoneInput.trim() || DEFAULT_PUSAT_BRANCH.phone,
+        isActive: generatedId === DEFAULT_BRANCH_ID ? true : branchActiveInput,
+        createdAt: editingBranch?.createdAt || new Date().toISOString(),
+      });
+      const updated = await fetchBranchesFromCloud().catch(() => branchesList);
+      setBranchesList(updated);
+      setBranchModalOpen(false);
+      showToast(
+        editingBranch
+          ? `Data cabang "${saved.name}" berhasil diperbarui!`
+          : `Cabang baru "${saved.name}" berhasil ditambahkan!`
+      );
+    } catch (err: any) {
+      showToast(err?.message || 'Gagal menyimpan data cabang ke Cloud Firestore');
+    } finally {
+      setSavingBranch(false);
+    }
+  };
+
+  const handleConfirmDeleteBranch = async () => {
+    if (!deleteBranchTarget) return;
+    if (deleteBranchTarget.id === DEFAULT_BRANCH_ID) {
+      showToast('Cabang Pusat dilindungi dan tidak dapat dihapus');
+      return;
+    }
+    const assignedStaffCount = usersList.filter(
+      (u) => u.role !== 'owner' && normalizeBranchId(u.branchId) === deleteBranchTarget.id
+    ).length;
+    if (assignedStaffCount > 0) {
+      showToast(
+        `Cabang "${deleteBranchTarget.name}" masih memiliki ${assignedStaffCount} staf aktif. Pindahkan staf terlebih dahulu.`
+      );
+      return;
+    }
+
+    setDeletingBranch(true);
+    try {
+      await deleteBranchFromCloud(deleteBranchTarget.id);
+      if (activeBranchId === deleteBranchTarget.id) {
+        switchBranch(DEFAULT_BRANCH_ID);
+      }
+      const updated = await fetchBranchesFromCloud().catch(() =>
+        branchesList.filter((b) => b.id !== deleteBranchTarget.id)
+      );
+      setBranchesList(updated);
+      showToast(`Cabang "${deleteBranchTarget.name}" berhasil dihapus.`);
+      setDeleteBranchTarget(null);
+    } catch (err: any) {
+      showToast(err?.message || 'Gagal menghapus cabang');
+    } finally {
+      setDeletingBranch(false);
     }
   };
 
@@ -197,6 +358,7 @@ export const UserManagementModule: React.FC = () => {
     setEditEmployeeId(usr.employeeId || usr.email || '');
     setEditName(usr.name);
     setEditRole(usr.role);
+    setEditBranchId(usr.role === 'owner' ? DEFAULT_BRANCH_ID : normalizeBranchId(usr.branchId));
     setEditPin(''); // Kosong secara default agar jika tidak diisi tetap mempertahankan password lama
     setShowEditPin(false);
     setEditModalOpen(true);
@@ -235,6 +397,9 @@ export const UserManagementModule: React.FC = () => {
         throw new Error('Password karyawan wajib diisi');
       }
 
+      const assignedBranchId =
+        editRole === 'owner' ? DEFAULT_BRANCH_ID : normalizeBranchId(editBranchId);
+
       const updatedUser: AppUser = {
         ...selectedUserForEdit,
         uid: selectedUserForEdit.uid || `emp-${cleanEmpId}`,
@@ -242,6 +407,7 @@ export const UserManagementModule: React.FC = () => {
         email: cleanEmpId,
         name: editName.trim(),
         role: editRole,
+        branchId: assignedBranchId,
         pin: nextPin,
       };
 
@@ -257,6 +423,7 @@ export const UserManagementModule: React.FC = () => {
           email: cleanEmpId,
           name: editName.trim(),
           role: editRole,
+          branchId: assignedBranchId,
           ...(editPin.trim() !== '' ? { pin: editPin.trim(), password: editPin.trim() } : {}),
         }),
       }).catch(() => {});
@@ -409,12 +576,146 @@ export const UserManagementModule: React.FC = () => {
           <div className="flex items-center gap-2">
             <Users className="w-5 h-5 text-indigo-600" />
             <h2 className="font-bold text-slate-900 text-lg">
-              Manajemen Pengguna & Pembagian Role (RBAC)
+              Manajemen Pengguna, Hak Akses &amp; Cabang Toko
             </h2>
           </div>
           <p className="text-xs text-slate-500 mt-1">
-            Atur hak akses staf toko (Owner, Kepala Toko, Kasir, dan Teknisi) untuk melindungi privasi laba margin HPP dan keamanan operasional terminal POS.
+            Kelola cabang toko (Pusat &amp; Cabang), pengaturan kop struk/WA tiap cabang, serta penempatan staf &amp; kasir pada masing-masing cabang.
           </p>
+        </div>
+      </div>
+
+      {/* Section: Kelola Cabang Toko (Pusat & Cabang) */}
+      <div className="bg-white rounded-2xl border border-slate-200 shadow-xs p-5 space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-100">
+          <div className="flex items-center gap-2.5">
+            <div className="w-8 h-8 rounded-xl bg-indigo-50 border border-indigo-200 text-indigo-600 flex items-center justify-center shrink-0">
+              <Building2 className="w-4 h-4" />
+            </div>
+            <div>
+              <h3 className="font-bold text-slate-900 text-sm">
+                Daftar Cabang Toko ({branchesList.length})
+              </h3>
+              <p className="text-[11px] text-slate-500">
+                Setiap cabang memiliki akun saldo (Cash, Brimo, Dana, Seabank), riwayat transaksi, kop struk, alamat &amp; nomor WA sendiri.
+              </p>
+            </div>
+          </div>
+
+          <button
+            type="button"
+            onClick={handleOpenCreateBranchModal}
+            className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold shadow-xs transition cursor-pointer shrink-0"
+          >
+            <Plus className="w-3.5 h-3.5" />
+            <span>Tambah Cabang Baru</span>
+          </button>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3.5">
+          {branchesList.map((branch) => {
+            const isPusat = branch.id === DEFAULT_BRANCH_ID;
+            const isCurrentActive = activeBranchId === branch.id;
+            const staffCount = usersList.filter(
+              (u) => u.role !== 'owner' && normalizeBranchId(u.branchId) === branch.id
+            ).length;
+
+            return (
+              <div
+                key={branch.id}
+                className={`p-4 rounded-xl border transition flex flex-col justify-between gap-3 ${
+                  isCurrentActive
+                    ? 'bg-indigo-50/40 border-indigo-300 shadow-xs'
+                    : 'bg-slate-50/60 border-slate-200 hover:border-slate-300'
+                }`}
+              >
+                <div className="space-y-2">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <span className="font-bold text-sm text-slate-900 truncate">
+                          {branch.name}
+                        </span>
+                        {isPusat && (
+                          <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-indigo-100 text-indigo-700 border border-indigo-200 uppercase">
+                            Pusat
+                          </span>
+                        )}
+                        {isCurrentActive && (
+                          <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-emerald-100 text-emerald-700 border border-emerald-200">
+                            Sedang Dibuka
+                          </span>
+                        )}
+                      </div>
+                      <div className="text-[10px] font-mono text-slate-400 mt-0.5">
+                        ID: {branch.id}
+                      </div>
+                    </div>
+
+                    <span
+                      className={`text-[10px] font-bold px-2 py-0.5 rounded-full border shrink-0 ${
+                        branch.isActive !== false
+                          ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                          : 'bg-slate-100 text-slate-500 border-slate-200'
+                      }`}
+                    >
+                      {branch.isActive !== false ? 'Aktif' : 'Nonaktif'}
+                    </span>
+                  </div>
+
+                  <div className="space-y-1 text-[11px] text-slate-600 pt-1">
+                    <div className="flex items-start gap-1.5">
+                      <Store className="w-3.5 h-3.5 text-indigo-500 shrink-0 mt-0.5" />
+                      <span className="font-semibold text-slate-800">{branch.receiptName}</span>
+                    </div>
+                    <div className="flex items-start gap-1.5">
+                      <MapPin className="w-3.5 h-3.5 text-slate-400 shrink-0 mt-0.5" />
+                      <span className="line-clamp-2">{branch.address}</span>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <Phone className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                      <span className="font-mono">{branch.phone}</span>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-between gap-2 pt-2.5 border-t border-slate-200/80">
+                  <span className="text-[10px] font-semibold text-slate-500">
+                    {staffCount} Staf Ditempatkan
+                  </span>
+                  <div className="flex items-center gap-1.5">
+                    {!isCurrentActive && branch.isActive !== false && (
+                      <button
+                        type="button"
+                        onClick={() => switchBranch(branch.id)}
+                        className="px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-white hover:bg-indigo-50 text-indigo-700 border border-slate-200 hover:border-indigo-200 transition cursor-pointer"
+                      >
+                        Buka
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => handleOpenEditBranchModal(branch)}
+                      className="px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-white hover:bg-slate-100 text-slate-700 border border-slate-200 inline-flex items-center gap-1 transition cursor-pointer"
+                    >
+                      <Pencil className="w-3 h-3" />
+                      <span>Edit</span>
+                    </button>
+                    {!isPusat && (
+                      <button
+                        type="button"
+                        onClick={() => setDeleteBranchTarget(branch)}
+                        className="p-1.5 rounded-lg text-rose-500 hover:text-rose-700 hover:bg-rose-50 border border-transparent hover:border-rose-200 transition cursor-pointer"
+                        title="Hapus Cabang"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </div>
+            );
+          })}
         </div>
       </div>
 
@@ -470,6 +771,32 @@ export const UserManagementModule: React.FC = () => {
                   <option value="manager">Kepala Toko / Manager</option>
                   <option value="owner">Owner (Super Admin)</option>
                 </select>
+              </div>
+
+              <div>
+                <label className="text-xs font-semibold text-slate-700 block mb-1">
+                  Penempatan Cabang
+                </label>
+                {role === 'owner' ? (
+                  <div className="w-full text-xs py-2 px-3 rounded-xl border border-purple-200 bg-purple-50 text-purple-800 font-semibold flex items-center gap-1.5">
+                    <Building2 className="w-3.5 h-3.5 shrink-0" />
+                    <span>Semua Cabang (Owner)</span>
+                  </div>
+                ) : (
+                  <select
+                    value={branchId}
+                    onChange={(e) => setBranchId(e.target.value)}
+                    className="w-full text-xs py-2 px-3 rounded-xl border border-slate-200 bg-white font-semibold focus:ring-2 focus:ring-indigo-500/20 focus:outline-none"
+                  >
+                    {branchesList
+                      .filter((b) => b.isActive !== false)
+                      .map((b) => (
+                        <option key={b.id} value={b.id}>
+                          {b.name} — {b.receiptName}
+                        </option>
+                      ))}
+                  </select>
+                )}
               </div>
 
               <div>
@@ -585,9 +912,14 @@ export const UserManagementModule: React.FC = () => {
                       {usr.role === 'owner' ? (
                         <span className="text-[10px] text-purple-700 bg-purple-50 px-2 py-0.5 rounded-full border border-purple-200 font-medium flex items-center gap-1">
                           <ShieldCheck className="w-3 h-3" />
-                          Pemilik
+                          Semua Cabang
                         </span>
-                      ) : null}
+                      ) : (
+                        <span className="text-[10px] text-indigo-700 bg-indigo-50 px-2 py-0.5 rounded-full border border-indigo-200 font-semibold flex items-center gap-1">
+                          <Building2 className="w-3 h-3" />
+                          {getBranchLabel(usr.branchId)}
+                        </span>
+                      )}
                     </div>
 
                     {/* Tombol Aksi Mobile */}
@@ -627,6 +959,7 @@ export const UserManagementModule: React.FC = () => {
                     <th className="px-4 py-3">ID Karyawan</th>
                     <th className="px-3 py-3">Nama Karyawan</th>
                     <th className="px-3 py-3">Role Akses</th>
+                    <th className="px-3 py-3">Cabang</th>
                     <th className="px-3 py-3">Password</th>
                     <th className="px-4 py-3 text-center">Aksi</th>
                   </tr>
@@ -634,13 +967,13 @@ export const UserManagementModule: React.FC = () => {
                 <tbody className="divide-y divide-slate-100 font-normal">
                   {loading ? (
                     <tr>
-                      <td colSpan={5} className="text-center py-8 text-slate-400">
+                      <td colSpan={6} className="text-center py-8 text-slate-400">
                         Memuat data pengguna...
                       </td>
                     </tr>
                   ) : usersList.length === 0 ? (
                     <tr>
-                      <td colSpan={5} className="text-center py-8 text-slate-400">
+                      <td colSpan={6} className="text-center py-8 text-slate-400">
                         Belum ada karyawan terdaftar
                       </td>
                     </tr>
@@ -663,6 +996,19 @@ export const UserManagementModule: React.FC = () => {
                           >
                             {roleInfo[usr.role]?.label || usr.role}
                           </span>
+                        </td>
+                        <td className="px-3 py-3">
+                          {usr.role === 'owner' ? (
+                            <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full bg-purple-50 text-purple-700 border border-purple-200">
+                              <ShieldCheck className="w-3 h-3" />
+                              Semua Cabang
+                            </span>
+                          ) : (
+                            <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-700 border border-indigo-200">
+                              <Building2 className="w-3 h-3" />
+                              {getBranchLabel(usr.branchId)}
+                            </span>
+                          )}
                         </td>
                         <td className="px-3 py-3">
                           <div className="flex items-center gap-1.5 font-mono">
@@ -813,14 +1159,39 @@ export const UserManagementModule: React.FC = () => {
                     onChange={(e) => setEditRole(e.target.value as UserRole)}
                     className="w-full text-xs py-2.5 px-3 rounded-xl border border-slate-200 bg-white font-medium focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 focus:outline-none cursor-pointer"
                   >
-                    <option value="owner">👑 Owner / Pemilik (Akses Penuh)</option>
-                    <option value="manager">👔 Kepala Toko / Manager</option>
-                    <option value="cashier">🛒 Kasir / Frontliner</option>
-                    <option value="technician">🔧 Teknisi Software HP</option>
+                    <option value="owner">Owner / Pemilik (Akses Penuh)</option>
+                    <option value="manager">Kepala Toko / Manager</option>
+                    <option value="cashier">Kasir / Frontliner</option>
+                    <option value="technician">Teknisi Software HP</option>
                   </select>
                   <span className="text-[10px] text-slate-500 mt-1 block">
                     {roleInfo[editRole]?.desc}
                   </span>
+                </div>
+
+                {/* Penempatan Cabang */}
+                <div>
+                  <label className="text-xs font-semibold text-slate-700 block mb-1">
+                    Penempatan Cabang
+                  </label>
+                  {editRole === 'owner' ? (
+                    <div className="w-full text-xs py-2.5 px-3 rounded-xl border border-purple-200 bg-purple-50 text-purple-800 font-semibold flex items-center gap-1.5">
+                      <Building2 className="w-3.5 h-3.5 shrink-0" />
+                      <span>Semua Cabang (Owner dapat memilih cabang dari Navbar)</span>
+                    </div>
+                  ) : (
+                    <select
+                      value={editBranchId}
+                      onChange={(e) => setEditBranchId(e.target.value)}
+                      className="w-full text-xs py-2.5 px-3 rounded-xl border border-slate-200 bg-white font-medium focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 focus:outline-none cursor-pointer"
+                    >
+                      {branchesList.map((b) => (
+                        <option key={b.id} value={b.id}>
+                          {b.name} ({b.receiptName})
+                        </option>
+                      ))}
+                    </select>
+                  )}
                 </div>
 
                 {/* Ganti Password Baru */}
@@ -1070,6 +1441,266 @@ export const UserManagementModule: React.FC = () => {
           </div>
         </div>
       )}
+
+      {/* Modal Tambah / Edit Cabang Toko */}
+      {branchModalOpen &&
+        createPortal(
+          <div
+            role="dialog"
+            aria-modal="true"
+            className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/45 backdrop-blur-md p-4 animate-in fade-in duration-200"
+            style={{ backdropFilter: 'blur(8px)', WebkitBackdropFilter: 'blur(8px)', overscrollBehavior: 'contain' }}
+            onTouchMove={handleBackdropTouchMove}
+            onWheel={handleBackdropWheel}
+            onClick={(e) => {
+              if (e.target === e.currentTarget && !savingBranch) {
+                setBranchModalOpen(false);
+              }
+            }}
+          >
+            <div
+              className="bg-white rounded-2xl shadow-xl max-w-md w-full max-h-[90vh] border border-slate-200 text-slate-900 flex flex-col overflow-hidden my-auto"
+              onTouchMove={handleModalCardScroll}
+              onWheel={handleModalCardScroll}
+            >
+              <div className="flex items-center justify-between p-4 sm:p-5 pb-3 border-b border-slate-100 shrink-0 bg-white">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-8 h-8 rounded-xl bg-indigo-50 border border-indigo-200 text-indigo-600 flex items-center justify-center">
+                    <Building2 className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <h3 className="font-bold text-sm text-slate-900">
+                      {editingBranch ? `Edit Cabang: ${editingBranch.name}` : 'Tambah Cabang Baru'}
+                    </h3>
+                    <p className="text-[11px] text-slate-500">
+                      Atur nama cabang, kop struk thermal, alamat, dan nomor WhatsApp.
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  disabled={savingBranch}
+                  onClick={() => setBranchModalOpen(false)}
+                  className="text-slate-400 hover:text-slate-600 p-1.5 rounded-lg hover:bg-slate-100 cursor-pointer"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              <form onSubmit={handleSaveBranch} className="flex flex-col flex-1 min-h-0">
+                <div className="flex-1 overflow-y-auto p-4 sm:p-5 space-y-3.5">
+                  <div>
+                    <label className="text-xs font-semibold text-slate-700 block mb-1">
+                      Nama Cabang
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      value={branchNameInput}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        setBranchNameInput(val);
+                        if (!editingBranch) {
+                          setBranchIdInput(val.trim() ? sanitizeBranchId(val) : '');
+                          if (!branchReceiptCustomized) {
+                            setBranchReceiptNameInput(
+                              val.trim() ? `Agen BRI Pakde Link - ${val.trim()}` : 'Agen BRI Pakde Link - '
+                            );
+                          }
+                        }
+                      }}
+                      placeholder="Contoh: Cabang 2"
+                      className="w-full text-xs py-2.5 px-3 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 focus:outline-none"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-xs font-semibold text-slate-700 block mb-1">
+                      Kode / ID Cabang (Sistem)
+                    </label>
+                    <input
+                      type="text"
+                      value={branchIdInput}
+                      disabled={Boolean(editingBranch)}
+                      onChange={(e) => setBranchIdInput(sanitizeBranchId(e.target.value))}
+                      placeholder="Otomatis dari nama, misal: cabang_2"
+                      className="w-full text-xs py-2.5 px-3 rounded-xl border border-slate-200 font-mono bg-slate-50 disabled:text-slate-500 focus:ring-2 focus:ring-indigo-500/20 focus:outline-none"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-xs font-semibold text-slate-700 block mb-1">
+                      Nama Toko di Struk &amp; Laporan
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      value={branchReceiptNameInput}
+                      onChange={(e) => {
+                        setBranchReceiptCustomized(true);
+                        setBranchReceiptNameInput(e.target.value);
+                      }}
+                      placeholder="Contoh: Agen BRI Pakde Link - Cabang 2"
+                      className="w-full text-xs py-2.5 px-3 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 focus:outline-none"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-xs font-semibold text-slate-700 block mb-1">
+                      Alamat Cabang
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      value={branchAddressInput}
+                      onChange={(e) => setBranchAddressInput(e.target.value)}
+                      placeholder="Contoh: Jl Raya Pasar Baru No. 12"
+                      className="w-full text-xs py-2.5 px-3 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 focus:outline-none"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-xs font-semibold text-slate-700 block mb-1">
+                      No. WA / Telepon Cabang
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      value={branchPhoneInput}
+                      onChange={(e) => setBranchPhoneInput(e.target.value)}
+                      placeholder="Contoh: WA: 081234567890"
+                      className="w-full text-xs py-2.5 px-3 rounded-xl border border-slate-200 font-mono focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 focus:outline-none"
+                    />
+                  </div>
+
+                  {editingBranch?.id !== DEFAULT_BRANCH_ID && (
+                    <label className="flex items-center gap-2.5 p-3 rounded-xl bg-slate-50 border border-slate-200 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={branchActiveInput}
+                        onChange={(e) => setBranchActiveInput(e.target.checked)}
+                        className="w-4 h-4 text-indigo-600 rounded border-slate-300"
+                      />
+                      <div>
+                        <div className="text-xs font-semibold text-slate-800">Cabang Aktif</div>
+                        <div className="text-[10px] text-slate-500">
+                          Nonaktifkan sementara jika cabang tutup agar tidak muncul di daftar kasir.
+                        </div>
+                      </div>
+                    </label>
+                  )}
+
+                  {!editingBranch && (
+                    <div className="p-3 rounded-xl bg-indigo-50/70 border border-indigo-200 text-[11px] text-indigo-800">
+                      Cabang baru dimulai dengan saldo akun <strong>Rp 0</strong> pada Cash, Brimo 1/2, Dana 1/2, dan Seabank. Gunakan menu <strong>Mutasi Cabang</strong> di halaman Keuangan Digital untuk drop modal dari Pusat.
+                    </div>
+                  )}
+                </div>
+
+                <div className="shrink-0 p-4 sm:p-5 pt-3 border-t border-slate-100 bg-white flex justify-end gap-2">
+                  <button
+                    type="button"
+                    disabled={savingBranch}
+                    onClick={() => setBranchModalOpen(false)}
+                    className="px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-xl cursor-pointer"
+                  >
+                    Batal
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={savingBranch}
+                    className="px-5 py-2 text-xs font-semibold rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white flex items-center gap-1.5 shadow-sm cursor-pointer disabled:opacity-50"
+                  >
+                    {savingBranch ? (
+                      <>
+                        <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                        <span>Menyimpan...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Save className="w-3.5 h-3.5" />
+                        <span>Simpan Cabang</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>,
+          document.body
+        )}
+
+      {/* Modal Konfirmasi Hapus Cabang */}
+      {deleteBranchTarget &&
+        createPortal(
+          <div
+            role="dialog"
+            aria-modal="true"
+            className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/45 backdrop-blur-md p-4 animate-in fade-in duration-200"
+            style={{ backdropFilter: 'blur(8px)', WebkitBackdropFilter: 'blur(8px)', overscrollBehavior: 'contain' }}
+            onTouchMove={handleBackdropTouchMove}
+            onWheel={handleBackdropWheel}
+            onClick={(e) => {
+              if (e.target === e.currentTarget && !deletingBranch) {
+                setDeleteBranchTarget(null);
+              }
+            }}
+          >
+            <div
+              className="bg-white rounded-2xl shadow-xl max-w-sm w-full p-6 border border-slate-200 text-slate-900 space-y-4 my-auto"
+              onTouchMove={handleModalCardScroll}
+              onWheel={handleModalCardScroll}
+            >
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-full bg-rose-100 border border-rose-200 text-rose-600 flex items-center justify-center shrink-0">
+                  <AlertTriangle className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="font-bold text-sm text-slate-900">
+                    Hapus Cabang &ldquo;{deleteBranchTarget.name}&rdquo;?
+                  </h3>
+                  <p className="text-xs text-slate-500">
+                    Cabang akan dihapus dari daftar cabang aktif.
+                  </p>
+                </div>
+              </div>
+
+              <p className="text-xs text-slate-600 leading-relaxed">
+                Pastikan tidak ada staf aktif yang masih ditempatkan di cabang ini sebelum menghapus.
+              </p>
+
+              <div className="flex justify-end gap-2 pt-2 border-t border-slate-100">
+                <button
+                  type="button"
+                  disabled={deletingBranch}
+                  onClick={() => setDeleteBranchTarget(null)}
+                  className="px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-xl cursor-pointer"
+                >
+                  Batal
+                </button>
+                <button
+                  type="button"
+                  disabled={deletingBranch}
+                  onClick={handleConfirmDeleteBranch}
+                  className="px-4 py-2 text-xs font-semibold rounded-xl bg-rose-600 hover:bg-rose-700 text-white flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                >
+                  {deletingBranch ? (
+                    <>
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                      <span>Menghapus...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Trash2 className="w-3.5 h-3.5" />
+                      <span>Hapus Cabang</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+          </div>,
+          document.body
+        )}
     </div>
   );
 };

@@ -12,7 +12,7 @@ import { Sale, DigitalTransaction, ServiceSoftwareOrder, AppUser } from './types
 import { useBodyScrollLock, initGlobalModalScrollLock } from './utils/scrollLock.ts';
 
 function AppContent() {
-  const { isLocked, unlockTerminal, currentRole } = useAuth();
+  const { isLocked, unlockTerminal, currentRole, activeBranch } = useAuth();
 
   const getInitialTab = (): ActiveTab => {
     if (typeof window !== 'undefined') {
@@ -154,13 +154,13 @@ function AppContent() {
       {!isDigitalTab ? (
         <footer className="bg-white border-t border-slate-200 py-3 text-center text-xs text-slate-500 no-print">
           <p>
-            Agen BRI Pakde Link &bull; Sistem Transaksi Agen BRILink, Top Up E-Wallet &amp; Pembayaran Digital
+            {activeBranch.receiptName} ({activeBranch.name}) &bull; Sistem Transaksi Agen BRILink, Top Up E-Wallet &amp; Pembayaran Digital
           </p>
         </footer>
       ) : (
         <footer className="bg-white border-t border-slate-200 py-2.5 text-center text-[11px] text-slate-500 no-print block lg:hidden">
           <p>
-            Agen BRI Pakde Link &bull; Sistem Transaksi Agen BRILink, Top Up E-Wallet &amp; Pembayaran Digital
+            {activeBranch.receiptName} ({activeBranch.name}) &bull; Sistem Transaksi Agen BRILink, Top Up E-Wallet &amp; Pembayaran Digital
           </p>
         </footer>
       )}
@@ -173,9 +173,9 @@ function AppContent() {
           digitalData={digitalReceiptData}
           serviceData={serviceReceiptData}
           onClose={() => setReceiptOpen(false)}
-          storeName="Agen BRI Pakde Link"
-          storeAddress="Jl Raya Pasar Gunungsari, Ulubelu"
-          storePhone="WA: 082281185001"
+          storeName={activeBranch.receiptName}
+          storeAddress={activeBranch.address}
+          storePhone={activeBranch.phone}
         />
       )}
     </div>

@@ -12,6 +12,7 @@ import {
 } from 'firebase/firestore';
 import { db, handleFirestoreError, OperationType } from '../lib/firebase.ts';
 import { AppUser, UserRole } from '../types/index.ts';
+import { DEFAULT_BRANCH_ID, normalizeBranchId } from './branchService.ts';
 
 export const USERS_COLLECTION = 'users';
 
@@ -47,6 +48,7 @@ export const BUILTIN_FALLBACK_USERS: AppUser[] = [
     email: '151500',
     name: 'Roni Jaswoko',
     role: 'owner',
+    branchId: DEFAULT_BRANCH_ID,
     pin: '8888',
   },
   {
@@ -56,6 +58,7 @@ export const BUILTIN_FALLBACK_USERS: AppUser[] = [
     email: '151501',
     name: 'Bella Heartfire',
     role: 'cashier',
+    branchId: DEFAULT_BRANCH_ID,
     pin: '9999',
   },
 ];
@@ -80,6 +83,7 @@ function normalizeAppUser(raw: any, docId?: string): AppUser {
     email: empId,
     name: String(raw?.name || '').trim(),
     role: safeRole,
+    branchId: safeRole === 'owner' ? DEFAULT_BRANCH_ID : normalizeBranchId(raw?.branchId),
     pin: raw?.pin ? String(raw.pin).trim() : '',
     createdAt: raw?.createdAt || raw?.updatedAt || new Date().toISOString(),
   };
@@ -117,6 +121,7 @@ export async function syncUserToFirestore(user: AppUser): Promise<void> {
   const cleanPin = String(user.pin || '').trim();
   const cleanUid = String(user.uid || '').trim() || `emp-${empId || user.id}`;
   const safeRole: UserRole = VALID_ROLES.includes(user.role) ? user.role : 'cashier';
+  const safeBranchId = safeRole === 'owner' ? DEFAULT_BRANCH_ID : normalizeBranchId(user.branchId);
   const safeId = Number(user.id);
 
   if (!Number.isFinite(safeId) || safeId <= 0) {
@@ -144,6 +149,7 @@ export async function syncUserToFirestore(user: AppUser): Promise<void> {
         email: empId,
         name: cleanName,
         role: safeRole,
+        branchId: safeBranchId,
         pin: cleanPin,
         createdAt: user.createdAt || new Date().toISOString(),
         updatedAt: new Date().toISOString(),

@@ -29,6 +29,7 @@ import {
   Filter,
   Users,
   Download,
+  Building2,
 } from 'lucide-react';
 import { Sale, DigitalTransaction, ServiceSoftwareOrder } from '../types/index.ts';
 import { useAuth } from '../context/AuthContext.tsx';
@@ -124,7 +125,7 @@ export const SalesHistoryModule: React.FC<SalesHistoryModuleProps> = ({
   onReprintSale,
   onReprintService,
 }) => {
-  const { currentRole } = useAuth();
+  const { currentRole, activeBranchId, activeBranch } = useAuth();
   const isOwner = currentRole === 'owner';
   const todayYMD = getLocalYMD(new Date());
 
@@ -140,7 +141,7 @@ export const SalesHistoryModule: React.FC<SalesHistoryModuleProps> = ({
 
   // Digital Transactions List
   const [digitalList, setDigitalList] = useState<DigitalTransaction[]>(() => {
-    return getStoredDigitalTransactions() || [];
+    return getStoredDigitalTransactions(activeBranchId) || [];
   });
   const [salesList, setSalesList] = useState<Sale[]>(() => {
     return getStoredSales() || [];
@@ -173,36 +174,21 @@ export const SalesHistoryModule: React.FC<SalesHistoryModuleProps> = ({
     return formatRupiah(0);
   };
 
-  // Load Transactions from Cloud Firestore first, fallback to API/localStorage
-  const loadAllTransactions = async () => {
+  // Load Transactions from Cloud Firestore per active branch
+  const loadAllTransactions = async (branchTarget: string = activeBranchId) => {
     try {
       const [cloudDigital, salesRes, srvRes] = await Promise.all([
-        fetchDigitalTransactionsFromCloud().catch(() => null),
+        fetchDigitalTransactionsFromCloud(branchTarget).catch(() => null),
         fetch('/api/sales?limit=50').catch(() => null),
         fetch('/api/services?limit=50').catch(() => null),
       ]);
 
       if (cloudDigital !== null) {
         setDigitalList(cloudDigital);
-        saveStoredDigitalTransactions(cloudDigital, true);
+        saveStoredDigitalTransactions(cloudDigital, true, branchTarget);
       } else {
-        const storedDigital = getStoredDigitalTransactions() || [];
-        const digiRes = await fetch('/api/digital-finance?limit=all').catch(() => null);
-        if (digiRes && digiRes.ok) {
-          const digiData = await digiRes.json();
-          if (Array.isArray(digiData) && digiData.length > 0) {
-            const normalizedServer = digiData.map((d: DigitalTransaction) =>
-              normalizeDigitalTransaction(d)
-            );
-            const merged = mergeDigitalTransactions(storedDigital, normalizedServer);
-            setDigitalList(merged);
-            saveStoredDigitalTransactions(merged, true);
-          } else {
-            setDigitalList(mergeDigitalTransactions(storedDigital));
-          }
-        } else {
-          setDigitalList(mergeDigitalTransactions(storedDigital));
-        }
+        const storedDigital = getStoredDigitalTransactions(branchTarget) || [];
+        setDigitalList(mergeDigitalTransactions(storedDigital));
       }
 
       if (salesRes && salesRes.ok) {
@@ -222,15 +208,17 @@ export const SalesHistoryModule: React.FC<SalesHistoryModuleProps> = ({
   };
 
   useEffect(() => {
-    loadAllTransactions();
+    setDigitalList(getStoredDigitalTransactions(activeBranchId) || []);
+    setLoading(true);
+    loadAllTransactions(activeBranchId);
 
     const unsubCloudTx = subscribeDigitalTransactionsCloud((cloudTxs, hasDocs, meta) => {
       if (hasDocs || !meta?.fromCache) {
         setDigitalList(cloudTxs);
-        saveStoredDigitalTransactions(cloudTxs, true);
+        saveStoredDigitalTransactions(cloudTxs, true, activeBranchId);
         setLoading(false);
       }
-    });
+    }, activeBranchId);
 
     const unsubDelete = onTransactionDeleted((payload) => {
       if (payload.category === 'digital' || payload.category === ('all' as any)) {
@@ -242,10 +230,10 @@ export const SalesHistoryModule: React.FC<SalesHistoryModuleProps> = ({
 
     const unsubUpdate = onDataUpdated((payload) => {
       if (payload.category === 'digital') {
-        const latestLocal = getStoredDigitalTransactions() || [];
+        const latestLocal = getStoredDigitalTransactions(activeBranchId) || [];
         setDigitalList(mergeDigitalTransactions(latestLocal));
       } else {
-        loadAllTransactions();
+        loadAllTransactions(activeBranchId);
       }
     });
 
@@ -254,7 +242,7 @@ export const SalesHistoryModule: React.FC<SalesHistoryModuleProps> = ({
       unsubDelete();
       unsubUpdate();
     };
-  }, []);
+  }, [activeBranchId]);
 
   const handleManualRefresh = () => {
     setRefreshing(true);
@@ -339,10 +327,15 @@ export const SalesHistoryModule: React.FC<SalesHistoryModuleProps> = ({
           rawType === 'tagihan'
         );
 
+      const isTransferCabangKeluar = rawType === 'transfer_cabang_keluar';
+      const isTransferCabangMasuk = rawType === 'transfer_cabang_masuk';
+
       const isTransferCard =
         !isTitipan &&
         !isBankMutation &&
-        !isCardTagihan && (
+        !isCardTagihan &&
+        !isTransferCabangKeluar &&
+        !isTransferCabangMasuk && (
           rawType.includes('transfer_saldo') ||
           rawType.includes('pindah_dana') ||
           rawType === 'transfer_card' ||
@@ -365,6 +358,14 @@ export const SalesHistoryModule: React.FC<SalesHistoryModuleProps> = ({
         digitalCategory = 'tagihan';
         categoryLabel = 'Tagihan';
         statusVariant = 'amber';
+      } else if (isTransferCabangKeluar) {
+        digitalCategory = 'transfer_card';
+        categoryLabel = 'Mutasi Cabang Keluar';
+        statusVariant = 'amber';
+      } else if (isTransferCabangMasuk) {
+        digitalCategory = 'transfer_card';
+        categoryLabel = 'Mutasi Cabang Masuk';
+        statusVariant = 'emerald';
       } else if (isTransferCard) {
         digitalCategory = 'transfer_card';
         categoryLabel = 'Transfer Antar Card';
@@ -659,6 +660,7 @@ export const SalesHistoryModule: React.FC<SalesHistoryModuleProps> = ({
         fundSource: transactionToDelete.fundSource || transactionToDelete.rawDigital?.fundSource,
         referenceNumber: invoice,
         status: 'success',
+        branchId: transactionToDelete.rawDigital?.branchId || activeBranchId,
         notes: transactionToDelete.notes,
         createdAt: new Date(transactionToDelete.timestamp).toISOString(),
       };
@@ -826,8 +828,9 @@ export const SalesHistoryModule: React.FC<SalesHistoryModuleProps> = ({
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     const safePeriod = effStart === effEnd ? effStart : `${effStart}_sd_${effEnd}`;
+    const safeBranch = (activeBranch?.name || 'Pusat').replace(/[^a-zA-Z0-9_-]+/g, '_');
     link.setAttribute('href', url);
-    link.setAttribute('download', `Riwayat_Transaksi_${safePeriod}.csv`);
+    link.setAttribute('download', `Riwayat_${safeBranch}_${safePeriod}.csv`);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -848,6 +851,10 @@ export const SalesHistoryModule: React.FC<SalesHistoryModuleProps> = ({
                 <h1 className="text-base sm:text-lg font-extrabold text-slate-900 tracking-tight">
                   Riwayat Transaksi & Struk Agen
                 </h1>
+                <span className="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-700 border border-indigo-200">
+                  <Building2 className="w-3 h-3" />
+                  Cabang: {activeBranch.name}
+                </span>
                 <span className="hidden lg:inline-flex text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-700 border border-indigo-100">
                   Agen BRILink, E-Wallet & PPOB
                 </span>

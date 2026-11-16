@@ -14,14 +14,28 @@ service cloud.firestore {
       return !(key in data) || data[key] == null || (data[key] is string && data[key].size() <= maxLen);
     }
 
+    function isValidBranch(data) {
+      return data.keys().hasAll(['id', 'name', 'receiptName', 'address', 'phone', 'isActive']) &&
+        data.keys().hasOnly(['id', 'name', 'receiptName', 'address', 'phone', 'isActive', 'createdAt', 'updatedAt']) &&
+        data.id is string && data.id.size() >= 1 && data.id.size() <= 64 &&
+        data.name is string && data.name.size() >= 1 && data.name.size() <= 120 &&
+        data.receiptName is string && data.receiptName.size() >= 1 && data.receiptName.size() <= 160 &&
+        data.address is string && data.address.size() >= 1 && data.address.size() <= 300 &&
+        data.phone is string && data.phone.size() >= 1 && data.phone.size() <= 64 &&
+        data.isActive is bool &&
+        isOptString(data, 'createdAt', 64) &&
+        isOptString(data, 'updatedAt', 64);
+    }
+
     function isValidAppUser(data) {
       return data.keys().hasAll(['id', 'uid', 'employeeId', 'name', 'role', 'pin']) &&
-        data.keys().hasOnly(['id', 'uid', 'employeeId', 'email', 'name', 'role', 'pin', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['id', 'uid', 'employeeId', 'email', 'name', 'role', 'branchId', 'pin', 'createdAt', 'updatedAt']) &&
         data.id is number &&
         data.uid is string && data.uid.size() >= 1 && data.uid.size() <= 128 &&
         data.employeeId is string && data.employeeId.size() >= 1 && data.employeeId.size() <= 64 &&
         data.name is string && data.name.size() >= 1 && data.name.size() <= 120 &&
         data.role in ['owner', 'manager', 'cashier', 'technician'] &&
+        isOptString(data, 'branchId', 64) &&
         data.pin is string && data.pin.size() >= 1 && data.pin.size() <= 64 &&
         isOptString(data, 'email', 128) &&
         isOptString(data, 'createdAt', 64) &&
@@ -34,7 +48,7 @@ service cloud.firestore {
           'id', 'type', 'provider', 'targetAccount', 'customerName',
           'nominal', 'adminBankCost', 'adminStoreFee', 'totalCustomerPaid',
           'profit', 'paymentMethod', 'referenceNumber', 'status',
-          'cashierUid', 'fundSource', 'operatorName', 'notes',
+          'cashierUid', 'branchId', 'fundSource', 'operatorName', 'notes',
           'createdAt', 'paidAt', 'updatedAt'
         ]) &&
         data.id is number &&
@@ -51,6 +65,7 @@ service cloud.firestore {
         isOptString(data, 'paymentMethod', 64) &&
         isOptString(data, 'status', 64) &&
         isOptString(data, 'cashierUid', 128) &&
+        isOptString(data, 'branchId', 64) &&
         isOptString(data, 'fundSource', 100) &&
         isOptString(data, 'operatorName', 120) &&
         isOptString(data, 'notes', 2000) &&
@@ -61,23 +76,25 @@ service cloud.firestore {
 
     function isValidTitipanAccount(data) {
       return data.keys().hasAll(['id', 'name', 'balance']) &&
-        data.keys().hasOnly(['id', 'name', 'balance', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['id', 'name', 'balance', 'branchId', 'createdAt', 'updatedAt']) &&
         data.id is string && data.id.size() >= 1 && data.id.size() <= 128 &&
         data.name is string && data.name.size() >= 1 && data.name.size() <= 160 &&
         data.balance is number && data.balance >= 0 &&
+        isOptString(data, 'branchId', 64) &&
         isOptString(data, 'createdAt', 64) &&
         isOptString(data, 'updatedAt', 64);
     }
 
     function isValidStoreExpense(data) {
       return data.keys().hasAll(['id', 'category', 'title', 'amount', 'expenseDate', 'paidBy']) &&
-        data.keys().hasOnly(['id', 'category', 'title', 'amount', 'expenseDate', 'paidBy', 'notes', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['id', 'category', 'title', 'amount', 'expenseDate', 'paidBy', 'branchId', 'notes', 'createdAt', 'updatedAt']) &&
         data.id is number &&
         data.category is string && data.category.size() >= 1 && data.category.size() <= 100 &&
         data.title is string && data.title.size() >= 1 && data.title.size() <= 300 &&
         data.amount is number && data.amount >= 0 &&
         data.expenseDate is string && data.expenseDate.size() >= 8 && data.expenseDate.size() <= 32 &&
         data.paidBy is string && data.paidBy.size() >= 1 && data.paidBy.size() <= 64 &&
+        isOptString(data, 'branchId', 64) &&
         isOptString(data, 'notes', 1000) &&
         isOptString(data, 'createdAt', 64) &&
         isOptString(data, 'updatedAt', 64);
@@ -85,8 +102,8 @@ service cloud.firestore {
 
     function isValidSetting(settingId, data) {
       return (
-        settingId == 'digital_account_balances' &&
-        data.keys().hasOnly(['cash', 'brimo1', 'brimo2', 'dana1', 'dana2', 'seabank', 'tagihan', 'hutang', 'tagihanNote', 'updatedAt']) &&
+        settingId.matches('^digital_account_balances(__[a-zA-Z0-9_\\-]+)?$') &&
+        data.keys().hasOnly(['cash', 'brimo1', 'brimo2', 'dana1', 'dana2', 'seabank', 'tagihan', 'hutang', 'tagihanNote', 'branchId', 'updatedAt']) &&
         data.cash is number && data.cash >= 0 &&
         data.brimo1 is number && data.brimo1 >= 0 &&
         data.brimo2 is number && data.brimo2 >= 0 &&
@@ -96,23 +113,34 @@ service cloud.firestore {
         (!( 'tagihan' in data ) || (data.tagihan is number && data.tagihan >= 0)) &&
         (!( 'hutang' in data ) || (data.hutang is number && data.hutang >= 0)) &&
         isOptString(data, 'tagihanNote', 1000) &&
+        isOptString(data, 'branchId', 64) &&
         isOptString(data, 'updatedAt', 64)
       ) || (
-        settingId == 'margin_fee_ledger' &&
-        data.keys().hasOnly(['baselineDateKey', 'takenByDate', 'history', 'updatedAt']) &&
+        settingId.matches('^margin_fee_ledger(__[a-zA-Z0-9_\\-]+)?$') &&
+        data.keys().hasOnly(['baselineDateKey', 'takenByDate', 'history', 'branchId', 'updatedAt']) &&
         isOptString(data, 'baselineDateKey', 32) &&
         (!( 'takenByDate' in data ) || data.takenByDate is map) &&
         (!( 'history' in data ) || (data.history is list && data.history.size() <= 100)) &&
+        isOptString(data, 'branchId', 64) &&
         isOptString(data, 'updatedAt', 64)
       ) || (
-        settingId == 'qris_profile' &&
-        data.keys().hasOnly(['merchantName', 'nmid', 'subCode', 'imageUrl', 'updatedAt']) &&
+        settingId.matches('^qris_profile(__[a-zA-Z0-9_\\-]+)?$') &&
+        data.keys().hasOnly(['merchantName', 'nmid', 'subCode', 'imageUrl', 'branchId', 'updatedAt']) &&
         isOptString(data, 'merchantName', 160) &&
         isOptString(data, 'nmid', 120) &&
         isOptString(data, 'subCode', 64) &&
         isOptString(data, 'imageUrl', 900000) &&
+        isOptString(data, 'branchId', 64) &&
         isOptString(data, 'updatedAt', 64)
       );
+    }
+
+    // Koleksi Master Cabang Toko (Pusat & Cabang)
+    match /branches/{branchId} {
+      allow list: if true;
+      allow get: if isValidId(branchId);
+      allow create, update: if isValidId(branchId) && isValidBranch(request.resource.data);
+      allow delete: if isValidId(branchId) && branchId != 'pusat';
     }
 
     // Koleksi Staf & Pengguna (RBAC & Autentikasi ID Karyawan)

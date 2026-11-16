@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
-import { Receipt, Plus, Trash2, Calendar, DollarSign, Tag, AlertTriangle } from 'lucide-react';
+import { Receipt, Plus, Trash2, Calendar, DollarSign, Tag, AlertTriangle, Building2 } from 'lucide-react';
 import { StoreExpense } from '../types/index.ts';
+import { useAuth } from '../context/AuthContext.tsx';
 import {
   getStoredExpenses,
   saveStoredExpenses,
@@ -37,8 +38,9 @@ const EXPENSE_PAYMENT_SOURCES: { key: FundSourceKey; label: string }[] = [
 ];
 
 export const ExpensesModule: React.FC = () => {
-  const [expenses, setExpenses] = useState<StoreExpense[]>(() => getStoredExpenses());
-  const [balances, setBalances] = useState<AccountBalances>(() => getStoredAccountBalances());
+  const { activeBranchId, activeBranch } = useAuth();
+  const [expenses, setExpenses] = useState<StoreExpense[]>(() => getStoredExpenses(activeBranchId));
+  const [balances, setBalances] = useState<AccountBalances>(() => getStoredAccountBalances(activeBranchId));
   const [loading, setLoading] = useState(true);
 
   // Form State
@@ -66,62 +68,50 @@ export const ExpensesModule: React.FC = () => {
     return Math.min(parseInt(digits, 10) || 0, 10000000000);
   };
 
-  const loadExpenses = async () => {
+  const loadExpenses = async (branchIdTarget: string = activeBranchId) => {
     setLoading(true);
     try {
       const [cloudExpenses, cloudBalances] = await Promise.all([
-        fetchExpensesFromCloud(),
-        fetchAccountBalancesFromCloud().catch(() => null),
+        fetchExpensesFromCloud(branchIdTarget),
+        fetchAccountBalancesFromCloud(branchIdTarget).catch(() => null),
       ]);
       const normalized = cloudExpenses.map(normalizeStoreExpense);
       setExpenses(normalized);
-      saveStoredExpenses(normalized);
+      saveStoredExpenses(normalized, branchIdTarget);
       if (cloudBalances && cloudBalances.exists && cloudBalances.balances) {
         setBalances(cloudBalances.balances);
-        saveStoredAccountBalances(cloudBalances.balances, false);
+        saveStoredAccountBalances(cloudBalances.balances, false, branchIdTarget);
+      } else {
+        setBalances(getStoredAccountBalances(branchIdTarget));
       }
     } catch (err) {
       console.warn('Gagal memuat pengeluaran dari Firestore, memeriksa fallback:', err);
-      try {
-        const res = await fetch('/api/expenses').catch(() => null);
-        if (res && res.ok) {
-          const contentType = res.headers.get('content-type') || '';
-          if (contentType.includes('application/json')) {
-            const data = await res.json();
-            if (Array.isArray(data) && data.length > 0) {
-              const normalized = data.map(normalizeStoreExpense);
-              setExpenses(normalized);
-              saveStoredExpenses(normalized);
-              return;
-            }
-          }
-        }
-      } catch {
-        // Fallback ke cache lokal
-      }
-      setExpenses(getStoredExpenses());
+      setExpenses(getStoredExpenses(branchIdTarget));
+      setBalances(getStoredAccountBalances(branchIdTarget));
     } finally {
       setLoading(false);
     }
   };
 
   useEffect(() => {
-    loadExpenses();
+    setExpenses(getStoredExpenses(activeBranchId));
+    setBalances(getStoredAccountBalances(activeBranchId));
+    loadExpenses(activeBranchId);
 
     const unsubCloudExpenses = subscribeExpensesCloud((cloudExpenses, hasDocs, meta) => {
       if (hasDocs || !meta?.fromCache) {
         setExpenses(cloudExpenses);
-        saveStoredExpenses(cloudExpenses);
+        saveStoredExpenses(cloudExpenses, activeBranchId);
         setLoading(false);
       }
-    });
+    }, activeBranchId);
 
     const unsubCloudBalances = subscribeAccountBalancesCloud((cloudBalances, _note, exists) => {
       if (exists && cloudBalances) {
         setBalances(cloudBalances);
-        saveStoredAccountBalances(cloudBalances, false);
+        saveStoredAccountBalances(cloudBalances, false, activeBranchId);
       }
-    });
+    }, activeBranchId);
 
     const unsubBalances = onAccountBalancesUpdated((latestBalances) => {
       setBalances(latestBalances);
@@ -131,7 +121,7 @@ export const ExpensesModule: React.FC = () => {
       unsubCloudBalances();
       unsubBalances();
     };
-  }, []);
+  }, [activeBranchId]);
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -158,15 +148,14 @@ export const ExpensesModule: React.FC = () => {
         amount,
         expenseDate,
         paidBy,
+        branchId: activeBranchId,
         notes: notes.trim() || undefined,
         createdAt: new Date().toISOString(),
       });
 
-      // 1. Simpan pengeluaran ke Cloud Firestore terlebih dahulu
       await saveExpenseToCloud(savedExpense);
 
-      // 2. Potong saldo card sumber dana & sinkronkan ke Cloud Firestore
-      const deductionResult = await processExpenseBalanceDeductionAsync(paidBy, amount);
+      const deductionResult = await processExpenseBalanceDeductionAsync(paidBy, amount, activeBranchId);
       if (!deductionResult.success) {
         await deleteExpenseFromCloud(savedExpense.id).catch(() => {});
         alert(deductionResult.message || 'Gagal memotong saldo pengeluaran');
@@ -174,16 +163,15 @@ export const ExpensesModule: React.FC = () => {
       }
       setBalances(deductionResult.balances);
 
-      // 3. Sinkronkan ke API lokal secara non-blocking
       fetch('/api/expenses', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(savedExpense),
       }).catch(() => {});
 
-      const currentStored = getStoredExpenses().filter((item) => item.id !== savedExpense.id);
+      const currentStored = getStoredExpenses(activeBranchId).filter((item) => item.id !== savedExpense.id);
       const nextList = [savedExpense, ...currentStored];
-      saveStoredExpenses(nextList);
+      saveStoredExpenses(nextList, activeBranchId);
       setExpenses(nextList);
 
       setTitle('');
@@ -205,13 +193,14 @@ export const ExpensesModule: React.FC = () => {
       return;
     }
     try {
+      const targetBranchId = toDelete.branchId || activeBranchId;
       await deleteExpenseFromCloud(id);
       if (toDelete.amount > 0) {
-        const refundedBalances = await processExpenseBalanceRefundAsync(toDelete.paidBy, toDelete.amount);
+        const refundedBalances = await processExpenseBalanceRefundAsync(toDelete.paidBy, toDelete.amount, targetBranchId);
         setBalances(refundedBalances);
       }
       fetch(`/api/expenses/${id}`, { method: 'DELETE' }).catch(() => null);
-      removeStoredExpense(id);
+      removeStoredExpense(id, targetBranchId);
       setExpenses((prev) => prev.filter((e) => e.id !== id));
       notifyDataUpdated('all');
     } catch (err: any) {
@@ -227,12 +216,16 @@ export const ExpensesModule: React.FC = () => {
       {/* Top Banner */}
       <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-xs flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
         <div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <Receipt className="w-5 h-5 text-indigo-600" />
             <h2 className="font-bold text-slate-900 text-lg">Pencatatan Rekap Beban & Pengeluaran Toko</h2>
+            <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-indigo-50 text-indigo-700 border border-indigo-200">
+              <Building2 className="w-3 h-3" />
+              Cabang: {activeBranch.name}
+            </span>
           </div>
           <p className="text-xs text-slate-500 mt-1">
-            Mencatat pengeluaran sewa ruko, token listrik, tagihan internet, ATK kertas thermal, kredit server tool, dan konsumsi.
+            Mencatat pengeluaran sewa ruko, token listrik, tagihan internet, ATK kertas thermal, kredit server tool, dan konsumsi untuk cabang {activeBranch.name}.
           </p>
         </div>
 

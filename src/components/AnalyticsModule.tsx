@@ -26,8 +26,10 @@ import {
   User,
   ShieldCheck,
   ArrowRight,
+  Building2,
 } from 'lucide-react';
 import { FinancialSummary, DigitalTransaction, StoreExpense } from '../types/index.ts';
+import { normalizeBranchId } from '../services/branchService.ts';
 import {
   onDataUpdated,
   onTransactionDeleted,
@@ -248,8 +250,10 @@ function matchesDivisionHelper(tx: DigitalTransaction, divKey: DigitalDivisionKe
   const type = (tx.type || '').toLowerCase();
   const provider = (tx.provider || '').toLowerCase();
 
-  // 1. MUTLAK: Transaksi Transfer Antar Card (TF Card), Card Tagihan internal, Transaksi Titipan, dan Potongan/Bunga Bank dipisahkan bersih dari semua divisi layanan utama!
+  // 1. MUTLAK: Transaksi Transfer Antar Card (TF Card), Mutasi Antar Cabang, Card Tagihan internal, Transaksi Titipan, dan Potongan/Bunga Bank dipisahkan bersih dari semua divisi layanan utama!
   if (
+    type === 'transfer_cabang_keluar' ||
+    type === 'transfer_cabang_masuk' ||
     isTransferCardTransaction(tx) ||
     isTagihanTransaction(tx) ||
     type.startsWith('titipan') ||
@@ -352,7 +356,7 @@ const INDONESIAN_MONTHS = [
 ];
 
 export const AnalyticsModule: React.FC = () => {
-  const { activeStaff, operatorName, currentRole } = useAuth();
+  const { activeStaff, operatorName, currentRole, activeBranchId, activeBranch } = useAuth();
 
   const getLocalDateStr = (d: Date = new Date()) => {
     const y = d.getFullYear();
@@ -386,13 +390,17 @@ export const AnalyticsModule: React.FC = () => {
   // Division Detail Drill-down Modal State
   const [selectedDivisionModal, setSelectedDivisionModal] = useState<DigitalDivisionKey | null>(null);
   const [divisionSearchQuery, setDivisionSearchQuery] = useState('');
-  const [allDigitalTransactions, setAllDigitalTransactions] = useState<DigitalTransaction[]>([]);
+  const [allDigitalTransactions, setAllDigitalTransactions] = useState<DigitalTransaction[]>(() =>
+    mergeDigitalTransactions(getStoredDigitalTransactions(activeBranchId))
+  );
   const [copiedRef, setCopiedRef] = useState<string | null>(null);
 
   // Operational Detail Drill-down Modal State (TF Card, Card Tagihan, Beban Toko)
   const [selectedOperationalModal, setSelectedOperationalModal] = useState<'tf_card' | 'tagihan' | 'beban_toko' | null>(null);
   const [operationalSearchQuery, setOperationalSearchQuery] = useState('');
-  const [allExpensesList, setAllExpensesList] = useState<StoreExpense[]>(() => getStoredExpenses());
+  const [allExpensesList, setAllExpensesList] = useState<StoreExpense[]>(() =>
+    getStoredExpenses(activeBranchId)
+  );
   const [balancesVersion, setBalancesVersion] = useState(0);
 
   // Download Report Modal State (PDF / CSV Formal Statement)
@@ -421,29 +429,31 @@ export const AnalyticsModule: React.FC = () => {
     return num < 0 ? `-Rp ${abs}` : `Rp ${abs}`;
   };
 
-  const loadDigitalTransactions = async () => {
+  const loadDigitalTransactions = async (targetBranchId: string = activeBranchId) => {
     try {
-      const cloudTxs = await fetchDigitalTransactionsFromCloud();
+      const cloudTxs = await fetchDigitalTransactionsFromCloud(targetBranchId);
       setAllDigitalTransactions(cloudTxs);
-      saveStoredDigitalTransactions(cloudTxs, true);
+      saveStoredDigitalTransactions(cloudTxs, true, targetBranchId);
       return;
     } catch {
       // Fallback ke API / cache lokal
     }
 
-    const stored = getStoredDigitalTransactions();
+    const stored = getStoredDigitalTransactions(targetBranchId);
     try {
       const res = await fetch('/api/digital-finance?limit=all');
       if (res.ok) {
         const serverData = await res.json();
         if (Array.isArray(serverData) && serverData.length > 0) {
-          const normalizedServer = serverData.map((d: DigitalTransaction) =>
-            normalizeDigitalTransaction(d)
-          );
-          const merged = mergeDigitalTransactions(stored, normalizedServer);
-          setAllDigitalTransactions(merged);
-          saveStoredDigitalTransactions(merged, true);
-          return;
+          const normalizedServer = serverData
+            .map((d: DigitalTransaction) => normalizeDigitalTransaction(d))
+            .filter((d: DigitalTransaction) => normalizeBranchId(d.branchId) === targetBranchId);
+          if (normalizedServer.length > 0) {
+            const merged = mergeDigitalTransactions(stored, normalizedServer);
+            setAllDigitalTransactions(merged);
+            saveStoredDigitalTransactions(merged, true, targetBranchId);
+            return;
+          }
         }
       }
     } catch {
@@ -452,12 +462,12 @@ export const AnalyticsModule: React.FC = () => {
     setAllDigitalTransactions(mergeDigitalTransactions(stored));
   };
 
-  const loadExpensesData = async () => {
+  const loadExpensesData = async (targetBranchId: string = activeBranchId) => {
     try {
-      const cloudExpenses = await fetchExpensesFromCloud();
+      const cloudExpenses = await fetchExpensesFromCloud(targetBranchId);
       const normalized = cloudExpenses.map(normalizeStoreExpense);
       setAllExpensesList(normalized);
-      saveStoredExpenses(normalized);
+      saveStoredExpenses(normalized, targetBranchId);
       return;
     } catch {
       // Fallback ke API / cache lokal
@@ -468,30 +478,36 @@ export const AnalyticsModule: React.FC = () => {
       if (res && res.ok) {
         const serverExpenses = await res.json();
         if (Array.isArray(serverExpenses)) {
-          const stored = getStoredExpenses();
+          const stored = getStoredExpenses(targetBranchId);
           const map = new Map<number, StoreExpense>();
-          for (const item of [...stored, ...serverExpenses]) {
+          for (const item of stored) {
             map.set(item.id, normalizeStoreExpense(item));
+          }
+          for (const item of serverExpenses) {
+            const norm = normalizeStoreExpense(item);
+            if (normalizeBranchId(norm.branchId) === targetBranchId) {
+              map.set(norm.id, norm);
+            }
           }
           const merged = Array.from(map.values());
           setAllExpensesList(merged);
-          saveStoredExpenses(merged);
+          saveStoredExpenses(merged, targetBranchId);
           return;
         }
       }
     } catch {
       // fallback
     }
-    setAllExpensesList(getStoredExpenses());
+    setAllExpensesList(getStoredExpenses(targetBranchId));
   };
 
-  const loadCloudBalances = async () => {
+  const loadCloudBalances = async (targetBranchId: string = activeBranchId) => {
     try {
-      const cloudRes = await fetchAccountBalancesFromCloud();
+      const cloudRes = await fetchAccountBalancesFromCloud(targetBranchId);
       if (cloudRes.exists && cloudRes.balances) {
-        saveStoredAccountBalances(cloudRes.balances, false);
+        saveStoredAccountBalances(cloudRes.balances, false, targetBranchId);
         if (cloudRes.tagihanNote !== undefined) {
-          saveStoredTagihanNote(cloudRes.tagihanNote, false);
+          saveStoredTagihanNote(cloudRes.tagihanNote, false, targetBranchId);
         }
         setBalancesVersion((v) => v + 1);
       }
@@ -500,24 +516,27 @@ export const AnalyticsModule: React.FC = () => {
     }
   };
 
-  const loadSummary = async (syncFromCloud = false) => {
+  const loadSummary = async (syncFromCloud = false, targetBranchId: string = activeBranchId) => {
     setLoading(true);
     try {
       if (syncFromCloud) {
         await Promise.all([
-          loadDigitalTransactions(),
-          loadExpensesData(),
-          loadCloudBalances(),
+          loadDigitalTransactions(targetBranchId),
+          loadExpensesData(targetBranchId),
+          loadCloudBalances(targetBranchId),
         ]);
       }
 
-      // Hitung agregasi data langsung dari data Cloud Firestore yang sudah tersinkron
-      const finalSummary = computeClientFinancialSummary({
-        periodType,
-        selectedMonth,
-        selectedYear,
-        selectedDate,
-      });
+      // Hitung agregasi data langsung dari data Cloud Firestore yang sudah tersinkron untuk cabang aktif
+      const finalSummary = computeClientFinancialSummary(
+        {
+          periodType,
+          selectedMonth,
+          selectedYear,
+          selectedDate,
+        },
+        targetBranchId
+      );
 
       setData(finalSummary);
 
@@ -537,47 +556,61 @@ export const AnalyticsModule: React.FC = () => {
   };
 
   useEffect(() => {
-    loadSummary(true);
+    const targetBranchId = activeBranchId;
+    setAllDigitalTransactions(mergeDigitalTransactions(getStoredDigitalTransactions(targetBranchId)));
+    setAllExpensesList(getStoredExpenses(targetBranchId));
+    setBalancesVersion((v) => v + 1);
 
-    const unsubCloudTx = subscribeDigitalTransactionsCloud((cloudTxs, hasDocs, meta) => {
-      if (hasDocs || !meta?.fromCache) {
-        setAllDigitalTransactions(cloudTxs);
-        saveStoredDigitalTransactions(cloudTxs, true);
-        loadSummary(false);
-      }
-    });
+    loadSummary(true, targetBranchId);
 
-    const unsubCloudBalances = subscribeAccountBalancesCloud((cloudBalances, cloudNote, exists) => {
-      if (exists && cloudBalances) {
-        saveStoredAccountBalances(cloudBalances, false);
-        if (cloudNote !== undefined) {
-          saveStoredTagihanNote(cloudNote, false);
+    const unsubCloudTx = subscribeDigitalTransactionsCloud(
+      (cloudTxs, hasDocs, meta) => {
+        if (hasDocs || !meta?.fromCache) {
+          setAllDigitalTransactions(cloudTxs);
+          saveStoredDigitalTransactions(cloudTxs, true, targetBranchId);
+          loadSummary(false, targetBranchId);
         }
-        setBalancesVersion((v) => v + 1);
-      }
-    });
+      },
+      targetBranchId
+    );
 
-    const unsubCloudExpenses = subscribeExpensesCloud((cloudExpenses, hasDocs, meta) => {
-      if (hasDocs || !meta?.fromCache) {
-        saveStoredExpenses(cloudExpenses);
-        setAllExpensesList(cloudExpenses);
-        loadSummary(false);
-      }
-    });
+    const unsubCloudBalances = subscribeAccountBalancesCloud(
+      (cloudBalances, cloudNote, exists) => {
+        if (exists && cloudBalances) {
+          saveStoredAccountBalances(cloudBalances, false, targetBranchId);
+          if (cloudNote !== undefined) {
+            saveStoredTagihanNote(cloudNote, false, targetBranchId);
+          }
+          setBalancesVersion((v) => v + 1);
+        }
+      },
+      targetBranchId
+    );
+
+    const unsubCloudExpenses = subscribeExpensesCloud(
+      (cloudExpenses, hasDocs, meta) => {
+        if (hasDocs || !meta?.fromCache) {
+          saveStoredExpenses(cloudExpenses, targetBranchId);
+          setAllExpensesList(cloudExpenses);
+          loadSummary(false, targetBranchId);
+        }
+      },
+      targetBranchId
+    );
 
     const unsubUpdate = onDataUpdated(() => {
-      setAllDigitalTransactions(mergeDigitalTransactions(getStoredDigitalTransactions()));
-      setAllExpensesList(getStoredExpenses());
-      loadSummary(false);
+      setAllDigitalTransactions(mergeDigitalTransactions(getStoredDigitalTransactions(targetBranchId)));
+      setAllExpensesList(getStoredExpenses(targetBranchId));
+      loadSummary(false, targetBranchId);
     });
     const unsubDelete = onTransactionDeleted(() => {
-      setAllDigitalTransactions(mergeDigitalTransactions(getStoredDigitalTransactions()));
-      setAllExpensesList(getStoredExpenses());
-      loadSummary(false);
+      setAllDigitalTransactions(mergeDigitalTransactions(getStoredDigitalTransactions(targetBranchId)));
+      setAllExpensesList(getStoredExpenses(targetBranchId));
+      loadSummary(false, targetBranchId);
     });
     const unsubBalances = onAccountBalancesUpdated(() => {
       setBalancesVersion((v) => v + 1);
-      loadSummary(false);
+      loadSummary(false, targetBranchId);
     });
 
     return () => {
@@ -588,7 +621,7 @@ export const AnalyticsModule: React.FC = () => {
       unsubDelete();
       unsubBalances();
     };
-  }, [periodType, selectedMonth, selectedYear, selectedDate]);
+  }, [periodType, selectedMonth, selectedYear, selectedDate, activeBranchId]);
 
   // Label text for active period
   const getActivePeriodLabel = () => {
@@ -655,17 +688,22 @@ export const AnalyticsModule: React.FC = () => {
     const recipientName = activeStaff?.name || operatorName || 'Pemilik / Kasir';
     const recipientRoleLabel = roleLabelMap[currentRole] || 'Kasir';
 
+    const branchPhoneRaw = (activeBranch.phone || '082281185001').trim();
+    const formattedPhone = branchPhoneRaw.toUpperCase().startsWith('WA')
+      ? branchPhoneRaw
+      : `WA: ${branchPhoneRaw}`;
+
     exportFinancialReport({
       format: downloadFormat,
       startDate: downloadStartDate,
       endDate: downloadEndDate,
       transactions: allDigitalTransactions,
-      balances: getStoredAccountBalances(),
+      balances: getStoredAccountBalances(activeBranchId),
       recipientName,
       recipientRoleLabel,
-      storeName: 'Agen BRI Pakde Link',
-      storeAddress: 'Jl Raya Pasar Gunungsari, Ulubelu',
-      storePhone: 'WA: 082281185001',
+      storeName: activeBranch.receiptName || 'Agen BRI Pakde Link',
+      storeAddress: activeBranch.address || 'Jl Raya Pasar Gunungsari, Ulubelu',
+      storePhone: formattedPhone,
     });
 
     setIsDownloadModalOpen(false);
@@ -901,19 +939,19 @@ export const AnalyticsModule: React.FC = () => {
 
   const currentTagihanBalance = React.useMemo(() => {
     try {
-      return getStoredAccountBalances().tagihan || 0;
+      return getStoredAccountBalances(activeBranchId).tagihan || 0;
     } catch {
       return 0;
     }
-  }, [data, balancesVersion]);
+  }, [data, balancesVersion, activeBranchId]);
 
   const currentTagihanNote = React.useMemo(() => {
     try {
-      return getStoredTagihanNote() || '';
+      return getStoredTagihanNote(activeBranchId) || '';
     } catch {
       return '';
     }
-  }, [data, balancesVersion]);
+  }, [data, balancesVersion, activeBranchId]);
 
   // 3. Data Beban Toko pada periode aktif
   const periodExpenses = React.useMemo(() => {
@@ -938,9 +976,16 @@ export const AnalyticsModule: React.FC = () => {
   const liveDigitalMetrics = React.useMemo(() => {
     let volume = 0;
     let feeProfit = 0;
+    let count = 0;
     for (const tx of periodAllDigitalTransactions) {
-      const vol = Number(tx.totalCustomerPaid) || ((Number(tx.nominal) || 0) + (Number(tx.adminStoreFee) || 0));
-      volume += vol;
+      const rawType = (tx.type || '').toLowerCase();
+      const isBranchTransfer =
+        rawType === 'transfer_cabang_keluar' || rawType === 'transfer_cabang_masuk';
+      if (!isBranchTransfer) {
+        const vol = Number(tx.totalCustomerPaid) || ((Number(tx.nominal) || 0) + (Number(tx.adminStoreFee) || 0));
+        volume += vol;
+        count += 1;
+      }
       if (!isHutangTransaction(tx)) {
         const adminFee = Number(tx.adminStoreFee) || 0;
         const bankCost = Number(tx.adminBankCost) || 0;
@@ -951,7 +996,7 @@ export const AnalyticsModule: React.FC = () => {
         feeProfit += profit;
       }
     }
-    return { volume, feeProfit, count: periodAllDigitalTransactions.length };
+    return { volume, feeProfit, count };
   }, [periodAllDigitalTransactions]);
 
   // Metrik Header Utama yang Mengagregasi Seluruh Transaksi & Card Real-Time
@@ -1034,8 +1079,10 @@ export const AnalyticsModule: React.FC = () => {
   }, [selectedOperationalModal, operationalSearchQuery, periodTfCardTransactions, periodTagihanTransactions, periodExpenses]);
 
   const handleExportOperationalCSV = (type: 'tf_card' | 'tagihan' | 'beban_toko') => {
+    const branchSlug = activeBranch.name.replace(/[\s\/\\]+/g, '_');
     if (type === 'tf_card') {
       let csv = `LAPORAN MUTASI TRANSFER ANTAR CARD (TF CARD)\n`;
+      csv += `Cabang: ${activeBranch.name} (${activeBranch.receiptName})\n`;
       csv += `Periode: ${activePeriodLabel}\nTanggal Cetak: ${new Date().toLocaleString('id-ID')}\n`;
       csv += `Total Transaksi: ${periodTfCardTransactions.length}\nTotal Volume: ${tfCardVolume}\n\n`;
       csv += `ID,Tanggal & Waktu,No. Referensi,Rute Mutasi,Akun Tujuan,Nominal Dipindah,Biaya Modal Bank,Catatan\n`;
@@ -1046,11 +1093,12 @@ export const AnalyticsModule: React.FC = () => {
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
       link.href = url;
-      link.download = `Laporan_TF_Card_${activePeriodLabel.replace(/[\s\/\\]+/g, '_')}.csv`;
+      link.download = `Laporan_TF_Card_${branchSlug}_${activePeriodLabel.replace(/[\s\/\\]+/g, '_')}.csv`;
       link.click();
       URL.revokeObjectURL(url);
     } else if (type === 'tagihan') {
       let csv = `LAPORAN TRANSAKSI & CATATAN CARD TAGIHAN\n`;
+      csv += `Cabang: ${activeBranch.name} (${activeBranch.receiptName})\n`;
       csv += `Periode: ${activePeriodLabel}\nTanggal Cetak: ${new Date().toLocaleString('id-ID')}\n`;
       csv += `Saldo Aktif Card Tagihan: ${currentTagihanBalance}\n`;
       csv += `Memo Catatan: ${(currentTagihanNote || '-').replace(/[\r\n,]+/g, ' ')}\n\n`;
@@ -1062,11 +1110,12 @@ export const AnalyticsModule: React.FC = () => {
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
       link.href = url;
-      link.download = `Laporan_Card_Tagihan_${activePeriodLabel.replace(/[\s\/\\]+/g, '_')}.csv`;
+      link.download = `Laporan_Card_Tagihan_${branchSlug}_${activePeriodLabel.replace(/[\s\/\\]+/g, '_')}.csv`;
       link.click();
       URL.revokeObjectURL(url);
     } else if (type === 'beban_toko') {
       let csv = `LAPORAN BEBAN OPERASIONAL TOKO\n`;
+      csv += `Cabang: ${activeBranch.name} (${activeBranch.receiptName})\n`;
       csv += `Periode: ${activePeriodLabel}\nTanggal Cetak: ${new Date().toLocaleString('id-ID')}\n`;
       csv += `Total Beban: ${data?.totalExpenses || periodExpensesTotal}\n\n`;
       csv += `ID,Tanggal,Kategori,Judul / Keterangan,Nominal Biaya,Sumber Pembayaran,Catatan\n`;
@@ -1077,7 +1126,7 @@ export const AnalyticsModule: React.FC = () => {
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
       link.href = url;
-      link.download = `Laporan_Beban_Toko_${activePeriodLabel.replace(/[\s\/\\]+/g, '_')}.csv`;
+      link.download = `Laporan_Beban_Toko_${branchSlug}_${activePeriodLabel.replace(/[\s\/\\]+/g, '_')}.csv`;
       link.click();
       URL.revokeObjectURL(url);
     }
@@ -1090,14 +1139,18 @@ export const AnalyticsModule: React.FC = () => {
         {/* Title & Cloud Sync Indicator */}
         <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
           <div>
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <BarChart3 className="w-5 h-5 text-indigo-600" />
               <h2 className="font-bold text-slate-900 text-lg">
                 Laporan Keuangan & Laba Rugi Agen BRILink, E-Wallet & PPOB
               </h2>
+              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-indigo-50 border border-indigo-200 text-indigo-700 text-[11px] font-bold">
+                <Building2 className="w-3 h-3" />
+                Cabang: {activeBranch.name}
+              </span>
             </div>
             <p className="text-xs text-slate-500 mt-1">
-              Rekapitulasi perputaran dana transaksi transfer bank, tarik tunai, top-up e-wallet, beban operasional, dan arus kas penerimaan kasir.
+              Rekapitulasi perputaran dana transaksi transfer bank, tarik tunai, top-up e-wallet, beban operasional, dan arus kas penerimaan kasir ({activeBranch.receiptName}).
             </p>
           </div>
 

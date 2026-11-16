@@ -18,6 +18,12 @@ import type {
   AccountBalances,
   MarginFeeLedgerState,
 } from './accountBalanceService.ts';
+import {
+  getActiveBranchId,
+  getBranchScopedDocId,
+  getBranchStorageKey,
+  normalizeBranchId,
+} from './branchService.ts';
 
 function isPermissionDeniedError(err: unknown): boolean {
   const code = String((err as any)?.code || '').toLowerCase();
@@ -99,6 +105,7 @@ export function normalizeDigitalTransaction(raw: any): DigitalTransaction {
       `${String(raw?.provider || 'TRX').slice(0, 3).toUpperCase()}-${id}`,
     status: raw?.status || 'success',
     cashierUid: raw?.cashierUid || null,
+    branchId: normalizeBranchId(raw?.branchId),
     fundSource: fundSource || undefined,
     operatorName: operatorName || undefined,
     notes,
@@ -134,6 +141,7 @@ export function mergeDigitalTransactions(
         map.set(key, {
           ...existing,
           ...item,
+          branchId: item.branchId || existing.branchId,
           fundSource: item.fundSource || existing.fundSource,
           operatorName: item.operatorName || existing.operatorName,
           notes: item.notes || existing.notes,
@@ -149,7 +157,6 @@ export function mergeDigitalTransactions(
     return (Number(b.id) || 0) - (Number(a.id) || 0);
   });
 
-  // Guarantee every transaction in memory has a strictly unique numeric ID to prevent ID collision
   const seenIds = new Set<number>();
   let fallbackId = Date.now();
   for (const tx of merged) {
@@ -166,15 +173,21 @@ export function mergeDigitalTransactions(
 }
 
 /**
- * Ambil seluruh transaksi Agen Digital langsung dari Cloud Firestore server
+ * Ambil seluruh transaksi Agen Digital cabang tertentu langsung dari Cloud Firestore server
  */
-export async function fetchDigitalTransactionsFromCloud(): Promise<DigitalTransaction[]> {
+export async function fetchDigitalTransactionsFromCloud(
+  branchId?: string
+): Promise<DigitalTransaction[]> {
+  const targetBranchId = normalizeBranchId(branchId || getActiveBranchId());
   const colRef = collection(db, DIGITAL_TRANSACTIONS_COLLECTION);
   try {
     const snap = await getDocsFromServer(colRef).catch(() => getDocs(colRef));
     const list: DigitalTransaction[] = [];
     snap.forEach((docSnap) => {
-      list.push(normalizeDigitalTransaction(docSnap.data()));
+      const normalized = normalizeDigitalTransaction(docSnap.data());
+      if (normalizeBranchId(normalized.branchId) === targetBranchId) {
+        list.push(normalized);
+      }
     });
     return mergeDigitalTransactions(list);
   } catch (err) {
@@ -191,7 +204,8 @@ export async function fetchDigitalTransactionsFromCloud(): Promise<DigitalTransa
 export async function saveDigitalTransactionToCloud(
   rawTx: DigitalTransaction
 ): Promise<void> {
-  const tx = normalizeDigitalTransaction(rawTx);
+  const branchId = normalizeBranchId(rawTx?.branchId || getActiveBranchId());
+  const tx = normalizeDigitalTransaction({ ...rawTx, branchId });
   const docId = getDigitalTransactionDocId(tx);
   const path = `${DIGITAL_TRANSACTIONS_COLLECTION}/${docId}`;
   try {
@@ -213,6 +227,7 @@ export async function saveDigitalTransactionToCloud(
         referenceNumber: tx.referenceNumber,
         status: tx.status || 'success',
         cashierUid: tx.cashierUid || null,
+        branchId,
         fundSource: tx.fundSource || null,
         operatorName: tx.operatorName || null,
         notes: tx.notes || null,
@@ -278,15 +293,17 @@ export async function deleteDigitalTransactionFromCloud(
 }
 
 /**
- * Berlangganan real-time transaksi Agen Digital dari Cloud Firestore
+ * Berlangganan real-time transaksi Agen Digital per cabang dari Cloud Firestore
  */
 export function subscribeDigitalTransactionsCloud(
   onUpdate: (
     transactions: DigitalTransaction[],
     hasDocs: boolean,
     meta?: SnapshotMeta
-  ) => void
+  ) => void,
+  branchId?: string
 ): Unsubscribe {
+  const targetBranchId = normalizeBranchId(branchId || getActiveBranchId());
   try {
     const colRef = collection(db, DIGITAL_TRANSACTIONS_COLLECTION);
     return onSnapshot(
@@ -294,10 +311,13 @@ export function subscribeDigitalTransactionsCloud(
       (snap) => {
         const list: DigitalTransaction[] = [];
         snap.forEach((docSnap) => {
-          list.push(normalizeDigitalTransaction(docSnap.data()));
+          const normalized = normalizeDigitalTransaction(docSnap.data());
+          if (normalizeBranchId(normalized.branchId) === targetBranchId) {
+            list.push(normalized);
+          }
         });
         const sorted = mergeDigitalTransactions(list);
-        onUpdate(sorted, !snap.empty, { fromCache: snap.metadata.fromCache });
+        onUpdate(sorted, sorted.length > 0, { fromCache: snap.metadata.fromCache });
       },
       (err) => {
         if (isPermissionDeniedError(err)) {
@@ -331,14 +351,15 @@ function parseAccountBalancesDoc(data: Record<string, any>): {
 }
 
 /**
- * Ambil saldo akun langsung dari Cloud Firestore server
+ * Ambil saldo akun cabang tertentu langsung dari Cloud Firestore server
  */
-export async function fetchAccountBalancesFromCloud(): Promise<{
+export async function fetchAccountBalancesFromCloud(branchId?: string): Promise<{
   exists: boolean;
   balances: AccountBalances | null;
   tagihanNote?: string;
 }> {
-  const docRef = doc(db, SETTINGS_COLLECTION, ACCOUNT_BALANCES_DOC_ID);
+  const docId = getBranchScopedDocId(ACCOUNT_BALANCES_DOC_ID, branchId || getActiveBranchId());
+  const docRef = doc(db, SETTINGS_COLLECTION, docId);
   try {
     const snap = await getDocFromServer(docRef).catch(() => getDoc(docRef));
     if (!snap.exists()) {
@@ -348,22 +369,25 @@ export async function fetchAccountBalancesFromCloud(): Promise<{
     return { exists: true, balances: parsed.balances, tagihanNote: parsed.tagihanNote };
   } catch (err) {
     if (isPermissionDeniedError(err)) {
-      handleFirestoreError(err, OperationType.GET, `${SETTINGS_COLLECTION}/${ACCOUNT_BALANCES_DOC_ID}`);
+      handleFirestoreError(err, OperationType.GET, `${SETTINGS_COLLECTION}/${docId}`);
     }
     throw err;
   }
 }
 
 /**
- * Sinkronisasi saldo akun Agen Digital & catatan tagihan ke Cloud Firestore
+ * Sinkronisasi saldo akun Agen Digital & catatan tagihan per cabang ke Cloud Firestore
  */
 export async function saveAccountBalancesToCloud(
   balances: AccountBalances,
-  tagihanNote?: string
+  tagihanNote?: string,
+  branchId?: string
 ): Promise<void> {
-  const path = `${SETTINGS_COLLECTION}/${ACCOUNT_BALANCES_DOC_ID}`;
+  const resolvedBranchId = normalizeBranchId(branchId || getActiveBranchId());
+  const docId = getBranchScopedDocId(ACCOUNT_BALANCES_DOC_ID, resolvedBranchId);
+  const path = `${SETTINGS_COLLECTION}/${docId}`;
   try {
-    const docRef = doc(db, SETTINGS_COLLECTION, ACCOUNT_BALANCES_DOC_ID);
+    const docRef = doc(db, SETTINGS_COLLECTION, docId);
     const payload: Record<string, unknown> = {
       cash: Math.max(0, Number(balances.cash) || 0),
       brimo1: Math.max(0, Number(balances.brimo1) || 0),
@@ -373,6 +397,7 @@ export async function saveAccountBalancesToCloud(
       seabank: Math.max(0, Number(balances.seabank) || 0),
       tagihan: Math.max(0, Number(balances.tagihan) || 0),
       hutang: Math.max(0, Number(balances.hutang) || 0),
+      branchId: resolvedBranchId,
       updatedAt: new Date().toISOString(),
     };
     if (tagihanNote !== undefined) {
@@ -394,10 +419,12 @@ export function subscribeAccountBalancesCloud(
     tagihanNote?: string,
     exists?: boolean,
     meta?: SnapshotMeta
-  ) => void
+  ) => void,
+  branchId?: string
 ): Unsubscribe {
+  const docId = getBranchScopedDocId(ACCOUNT_BALANCES_DOC_ID, branchId || getActiveBranchId());
   try {
-    const docRef = doc(db, SETTINGS_COLLECTION, ACCOUNT_BALANCES_DOC_ID);
+    const docRef = doc(db, SETTINGS_COLLECTION, docId);
     return onSnapshot(
       docRef,
       (snap) => {
@@ -411,7 +438,7 @@ export function subscribeAccountBalancesCloud(
       },
       (err) => {
         if (isPermissionDeniedError(err)) {
-          handleFirestoreError(err, OperationType.GET, `${SETTINGS_COLLECTION}/${ACCOUNT_BALANCES_DOC_ID}`);
+          handleFirestoreError(err, OperationType.GET, `${SETTINGS_COLLECTION}/${docId}`);
         }
         console.warn('Snapshot saldo akun Cloud Firestore warning:', err);
       }
@@ -423,13 +450,14 @@ export function subscribeAccountBalancesCloud(
 }
 
 /**
- * Ambil ledger Margin Fee langsung dari Cloud Firestore server
+ * Ambil ledger Margin Fee cabang tertentu langsung dari Cloud Firestore server
  */
-export async function fetchMarginFeeLedgerFromCloud(): Promise<{
+export async function fetchMarginFeeLedgerFromCloud(branchId?: string): Promise<{
   exists: boolean;
   ledger: MarginFeeLedgerState | null;
 }> {
-  const docRef = doc(db, SETTINGS_COLLECTION, MARGIN_FEE_LEDGER_DOC_ID);
+  const docId = getBranchScopedDocId(MARGIN_FEE_LEDGER_DOC_ID, branchId || getActiveBranchId());
+  const docRef = doc(db, SETTINGS_COLLECTION, docId);
   try {
     const snap = await getDocFromServer(docRef).catch(() => getDoc(docRef));
     if (!snap.exists()) {
@@ -450,27 +478,31 @@ export async function fetchMarginFeeLedgerFromCloud(): Promise<{
     };
   } catch (err) {
     if (isPermissionDeniedError(err)) {
-      handleFirestoreError(err, OperationType.GET, `${SETTINGS_COLLECTION}/${MARGIN_FEE_LEDGER_DOC_ID}`);
+      handleFirestoreError(err, OperationType.GET, `${SETTINGS_COLLECTION}/${docId}`);
     }
     throw err;
   }
 }
 
 /**
- * Sinkronisasi catatan pengambilan Margin Fee (ledger) ke Cloud Firestore
+ * Sinkronisasi catatan pengambilan Margin Fee (ledger) per cabang ke Cloud Firestore
  */
 export async function saveMarginFeeLedgerToCloud(
-  ledger: MarginFeeLedgerState
+  ledger: MarginFeeLedgerState,
+  branchId?: string
 ): Promise<void> {
-  const path = `${SETTINGS_COLLECTION}/${MARGIN_FEE_LEDGER_DOC_ID}`;
+  const resolvedBranchId = normalizeBranchId(branchId || getActiveBranchId());
+  const docId = getBranchScopedDocId(MARGIN_FEE_LEDGER_DOC_ID, resolvedBranchId);
+  const path = `${SETTINGS_COLLECTION}/${docId}`;
   try {
-    const docRef = doc(db, SETTINGS_COLLECTION, MARGIN_FEE_LEDGER_DOC_ID);
+    const docRef = doc(db, SETTINGS_COLLECTION, docId);
     await setDoc(
       docRef,
       {
         baselineDateKey: ledger.baselineDateKey,
         takenByDate: ledger.takenByDate || {},
         history: Array.isArray(ledger.history) ? ledger.history.slice(0, 100) : [],
+        branchId: resolvedBranchId,
         updatedAt: new Date().toISOString(),
       },
       { merge: true }
@@ -489,10 +521,12 @@ export function subscribeMarginFeeLedgerCloud(
     ledger: MarginFeeLedgerState | null,
     exists: boolean,
     meta?: SnapshotMeta
-  ) => void
+  ) => void,
+  branchId?: string
 ): Unsubscribe {
+  const docId = getBranchScopedDocId(MARGIN_FEE_LEDGER_DOC_ID, branchId || getActiveBranchId());
   try {
-    const docRef = doc(db, SETTINGS_COLLECTION, MARGIN_FEE_LEDGER_DOC_ID);
+    const docRef = doc(db, SETTINGS_COLLECTION, docId);
     return onSnapshot(
       docRef,
       (snap) => {
@@ -522,7 +556,7 @@ export function subscribeMarginFeeLedgerCloud(
       },
       (err) => {
         if (isPermissionDeniedError(err)) {
-          handleFirestoreError(err, OperationType.GET, `${SETTINGS_COLLECTION}/${MARGIN_FEE_LEDGER_DOC_ID}`);
+          handleFirestoreError(err, OperationType.GET, `${SETTINGS_COLLECTION}/${docId}`);
         }
         console.warn('Snapshot ledger Margin Fee Cloud Firestore warning:', err);
       }
@@ -537,6 +571,7 @@ export interface TitipanAccount {
   id: string;
   name: string;
   balance: number;
+  branchId?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -549,15 +584,17 @@ export function normalizeTitipanAccount(raw: any): TitipanAccount {
     id: String(raw?.id || `titipan_${Date.now()}`),
     name: String(raw?.name || 'Penitip').trim() || 'Penitip',
     balance: Math.max(0, Math.round(Number(raw?.balance) || 0)),
+    branchId: normalizeBranchId(raw?.branchId),
     createdAt: toIsoTimestamp(raw?.createdAt),
     updatedAt: toIsoTimestamp(raw?.updatedAt),
   };
 }
 
-export function getStoredTitipanAccounts(): TitipanAccount[] {
+export function getStoredTitipanAccounts(branchId?: string): TitipanAccount[] {
   if (typeof window === 'undefined') return [];
+  const key = getBranchStorageKey(STORAGE_KEY_TITIPAN_ACCOUNTS, branchId || getActiveBranchId());
   try {
-    const raw = localStorage.getItem(STORAGE_KEY_TITIPAN_ACCOUNTS);
+    const raw = localStorage.getItem(key);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
@@ -567,22 +604,27 @@ export function getStoredTitipanAccounts(): TitipanAccount[] {
   }
 }
 
-export function saveStoredTitipanAccounts(accounts: TitipanAccount[]): void {
+export function saveStoredTitipanAccounts(accounts: TitipanAccount[], branchId?: string): void {
   if (typeof window === 'undefined') return;
+  const key = getBranchStorageKey(STORAGE_KEY_TITIPAN_ACCOUNTS, branchId || getActiveBranchId());
   try {
-    localStorage.setItem(STORAGE_KEY_TITIPAN_ACCOUNTS, JSON.stringify(accounts));
+    localStorage.setItem(key, JSON.stringify(accounts));
   } catch (err) {
     console.warn('Gagal menyimpan daftar titipan ke localStorage:', err);
   }
 }
 
-export async function fetchTitipanAccountsFromCloud(): Promise<TitipanAccount[]> {
+export async function fetchTitipanAccountsFromCloud(branchId?: string): Promise<TitipanAccount[]> {
+  const targetBranchId = normalizeBranchId(branchId || getActiveBranchId());
   const colRef = collection(db, TITIPAN_ACCOUNTS_COLLECTION);
   try {
     const snap = await getDocsFromServer(colRef).catch(() => getDocs(colRef));
     const list: TitipanAccount[] = [];
     snap.forEach((docSnap) => {
-      list.push(normalizeTitipanAccount({ id: docSnap.id, ...docSnap.data() }));
+      const normalized = normalizeTitipanAccount({ id: docSnap.id, ...docSnap.data() });
+      if (normalizeBranchId(normalized.branchId) === targetBranchId) {
+        list.push(normalized);
+      }
     });
     list.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
     return list;
@@ -595,7 +637,8 @@ export async function fetchTitipanAccountsFromCloud(): Promise<TitipanAccount[]>
 }
 
 export async function saveTitipanAccountToCloud(account: TitipanAccount): Promise<void> {
-  const normalized = normalizeTitipanAccount(account);
+  const branchId = normalizeBranchId(account?.branchId || getActiveBranchId());
+  const normalized = normalizeTitipanAccount({ ...account, branchId });
   const docId = normalized.id.replace(/[^a-zA-Z0-9_-]/g, '_');
   const path = `${TITIPAN_ACCOUNTS_COLLECTION}/${docId}`;
   try {
@@ -625,8 +668,10 @@ export async function deleteTitipanAccountFromCloud(id: string): Promise<void> {
 }
 
 export function subscribeTitipanAccountsCloud(
-  onUpdate: (accounts: TitipanAccount[], hasDocs: boolean, meta?: SnapshotMeta) => void
+  onUpdate: (accounts: TitipanAccount[], hasDocs: boolean, meta?: SnapshotMeta) => void,
+  branchId?: string
 ): Unsubscribe {
+  const targetBranchId = normalizeBranchId(branchId || getActiveBranchId());
   try {
     const colRef = collection(db, TITIPAN_ACCOUNTS_COLLECTION);
     return onSnapshot(
@@ -634,10 +679,13 @@ export function subscribeTitipanAccountsCloud(
       (snap) => {
         const list: TitipanAccount[] = [];
         snap.forEach((docSnap) => {
-          list.push(normalizeTitipanAccount({ id: docSnap.id, ...docSnap.data() }));
+          const normalized = normalizeTitipanAccount({ id: docSnap.id, ...docSnap.data() });
+          if (normalizeBranchId(normalized.branchId) === targetBranchId) {
+            list.push(normalized);
+          }
         });
         list.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
-        onUpdate(list, !snap.empty, { fromCache: snap.metadata.fromCache });
+        onUpdate(list, list.length > 0, { fromCache: snap.metadata.fromCache });
       },
       (err) => {
         if (isPermissionDeniedError(err)) {
@@ -664,18 +712,23 @@ export function normalizeStoreExpense(raw: any): StoreExpense {
     amount: Math.max(0, Math.round(Number(raw?.amount) || 0)),
     expenseDate: String(raw?.expenseDate || new Date().toISOString().slice(0, 10)).slice(0, 10),
     paidBy: String(raw?.paidBy || 'cash'),
+    branchId: normalizeBranchId(raw?.branchId),
     notes: raw?.notes ? String(raw.notes) : undefined,
     createdAt: toIsoTimestamp(raw?.createdAt),
   };
 }
 
-export async function fetchExpensesFromCloud(): Promise<StoreExpense[]> {
+export async function fetchExpensesFromCloud(branchId?: string): Promise<StoreExpense[]> {
+  const targetBranchId = normalizeBranchId(branchId || getActiveBranchId());
   const colRef = collection(db, STORE_EXPENSES_COLLECTION);
   try {
     const snap = await getDocsFromServer(colRef).catch(() => getDocs(colRef));
     const list: StoreExpense[] = [];
     snap.forEach((docSnap) => {
-      list.push(normalizeStoreExpense(docSnap.data()));
+      const normalized = normalizeStoreExpense(docSnap.data());
+      if (normalizeBranchId(normalized.branchId) === targetBranchId) {
+        list.push(normalized);
+      }
     });
     list.sort((a, b) => {
       const dDiff = String(b.expenseDate || '').localeCompare(String(a.expenseDate || ''));
@@ -692,7 +745,8 @@ export async function fetchExpensesFromCloud(): Promise<StoreExpense[]> {
 }
 
 export async function saveExpenseToCloud(rawExpense: StoreExpense): Promise<void> {
-  const expense = normalizeStoreExpense(rawExpense);
+  const branchId = normalizeBranchId(rawExpense?.branchId || getActiveBranchId());
+  const expense = normalizeStoreExpense({ ...rawExpense, branchId });
   const docId = `exp_${expense.id}`;
   try {
     const ref = doc(db, STORE_EXPENSES_COLLECTION, docId);
@@ -705,6 +759,7 @@ export async function saveExpenseToCloud(rawExpense: StoreExpense): Promise<void
         amount: expense.amount,
         expenseDate: expense.expenseDate,
         paidBy: expense.paidBy,
+        branchId,
         notes: expense.notes || null,
         createdAt: expense.createdAt || new Date().toISOString(),
         updatedAt: new Date().toISOString(),
@@ -737,8 +792,10 @@ export async function deleteExpenseFromCloud(id: number): Promise<void> {
 }
 
 export function subscribeExpensesCloud(
-  onUpdate: (expenses: StoreExpense[], hasDocs: boolean, meta?: SnapshotMeta) => void
+  onUpdate: (expenses: StoreExpense[], hasDocs: boolean, meta?: SnapshotMeta) => void,
+  branchId?: string
 ): Unsubscribe {
+  const targetBranchId = normalizeBranchId(branchId || getActiveBranchId());
   try {
     const colRef = collection(db, STORE_EXPENSES_COLLECTION);
     return onSnapshot(
@@ -746,14 +803,17 @@ export function subscribeExpensesCloud(
       (snap) => {
         const list: StoreExpense[] = [];
         snap.forEach((docSnap) => {
-          list.push(normalizeStoreExpense(docSnap.data()));
+          const normalized = normalizeStoreExpense(docSnap.data());
+          if (normalizeBranchId(normalized.branchId) === targetBranchId) {
+            list.push(normalized);
+          }
         });
         list.sort((a, b) => {
           const dDiff = String(b.expenseDate || '').localeCompare(String(a.expenseDate || ''));
           if (dDiff !== 0) return dDiff;
           return (Number(b.id) || 0) - (Number(a.id) || 0);
         });
-        onUpdate(list, !snap.empty, { fromCache: snap.metadata.fromCache });
+        onUpdate(list, list.length > 0, { fromCache: snap.metadata.fromCache });
       },
       (err) => {
         if (isPermissionDeniedError(err)) {

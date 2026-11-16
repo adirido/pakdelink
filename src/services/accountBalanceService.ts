@@ -1,8 +1,17 @@
-// Service manajemen saldo akun dan sumber dana agen terpadu
+// Service manajemen saldo akun dan sumber dana agen terpadu (multi-cabang)
+import type { DigitalTransaction } from '../types/index.ts';
 import {
+  fetchAccountBalancesFromCloud,
   saveAccountBalancesToCloud,
+  saveDigitalTransactionToCloud,
   saveMarginFeeLedgerToCloud,
 } from './cloudDigitalFinanceService.ts';
+import {
+  DEFAULT_BRANCH_ID,
+  getActiveBranchId,
+  getBranchStorageKey,
+  normalizeBranchId,
+} from './branchService.ts';
 
 export type InternalFundKey = 'cash' | 'brimo1' | 'brimo2' | 'dana1' | 'dana2' | 'seabank' | 'tagihan';
 export type HutangReceiverAccountKey = 'cash' | 'brimo1' | 'brimo2' | 'dana1' | 'dana2' | 'seabank';
@@ -91,7 +100,7 @@ export const FUND_SOURCES_CONFIG: FundSourceMeta[] = [
 const STORAGE_KEY_BALANCES = 'konter_digital_account_balances_v1';
 const EVENT_BALANCES_UPDATED = 'konter_account_balances_updated';
 
-// Default initial balances (tersimpan aman di localStorage)
+// Default initial balances untuk cabang Pusat jika belum pernah diinisialisasi
 export const DEFAULT_BALANCES: AccountBalances = {
   cash: 3500000,
   brimo1: 8500000,
@@ -103,23 +112,51 @@ export const DEFAULT_BALANCES: AccountBalances = {
   hutang: 0,
 };
 
+// Default saldo awal Rp 0 untuk cabang baru selain Pusat
+export const ZERO_BALANCES: AccountBalances = {
+  cash: 0,
+  brimo1: 0,
+  brimo2: 0,
+  dana1: 0,
+  dana2: 0,
+  seabank: 0,
+  tagihan: 0,
+  hutang: 0,
+};
+
+export function getDefaultBalancesForBranch(branchId?: string): AccountBalances {
+  const normalized = normalizeBranchId(branchId || getActiveBranchId());
+  return normalized === DEFAULT_BRANCH_ID ? { ...DEFAULT_BALANCES } : { ...ZERO_BALANCES };
+}
+
 const STORAGE_KEY_TAGIHAN_NOTE = 'konter_digital_tagihan_note_v1';
 
-export function getStoredTagihanNote(): string {
+export function getStoredTagihanNote(branchId?: string): string {
   if (typeof window === 'undefined') return '';
+  const key = getBranchStorageKey(STORAGE_KEY_TAGIHAN_NOTE, branchId || getActiveBranchId());
   try {
-    return localStorage.getItem(STORAGE_KEY_TAGIHAN_NOTE) || '';
+    return localStorage.getItem(key) || '';
   } catch {
     return '';
   }
 }
 
-export function saveStoredTagihanNote(note: string, syncCloud: boolean = true): void {
+export function saveStoredTagihanNote(
+  note: string,
+  syncCloud: boolean = true,
+  branchId?: string
+): void {
   if (typeof window === 'undefined') return;
+  const resolvedBranchId = normalizeBranchId(branchId || getActiveBranchId());
+  const key = getBranchStorageKey(STORAGE_KEY_TAGIHAN_NOTE, resolvedBranchId);
   try {
-    localStorage.setItem(STORAGE_KEY_TAGIHAN_NOTE, note);
+    localStorage.setItem(key, note);
     if (syncCloud) {
-      saveAccountBalancesToCloud(getStoredAccountBalances(), note).catch((err) => {
+      saveAccountBalancesToCloud(
+        getStoredAccountBalances(resolvedBranchId),
+        note,
+        resolvedBranchId
+      ).catch((err) => {
         console.warn('Gagal sinkronisasi catatan tagihan ke Cloud Firestore:', err);
       });
     }
@@ -128,44 +165,52 @@ export function saveStoredTagihanNote(note: string, syncCloud: boolean = true): 
 
 export async function saveStoredTagihanNoteAsync(
   note: string,
-  syncCloud: boolean = true
+  syncCloud: boolean = true,
+  branchId?: string
 ): Promise<void> {
+  const resolvedBranchId = normalizeBranchId(branchId || getActiveBranchId());
   if (syncCloud) {
-    await saveAccountBalancesToCloud(getStoredAccountBalances(), note);
+    await saveAccountBalancesToCloud(
+      getStoredAccountBalances(resolvedBranchId),
+      note,
+      resolvedBranchId
+    );
   }
   if (typeof window !== 'undefined') {
+    const key = getBranchStorageKey(STORAGE_KEY_TAGIHAN_NOTE, resolvedBranchId);
     try {
-      localStorage.setItem(STORAGE_KEY_TAGIHAN_NOTE, note);
+      localStorage.setItem(key, note);
     } catch {}
   }
 }
 
 /**
- * Mengambil data saldo seluruh akun dari LocalStorage
+ * Mengambil data saldo seluruh akun cabang dari LocalStorage
  */
-export function getStoredAccountBalances(): AccountBalances {
-  if (typeof window === 'undefined') return { ...DEFAULT_BALANCES };
+export function getStoredAccountBalances(branchId?: string): AccountBalances {
+  const resolvedBranchId = normalizeBranchId(branchId || getActiveBranchId());
+  const fallback = getDefaultBalancesForBranch(resolvedBranchId);
+  if (typeof window === 'undefined') return { ...fallback };
+  const key = getBranchStorageKey(STORAGE_KEY_BALANCES, resolvedBranchId);
   try {
-    const raw = localStorage.getItem(STORAGE_KEY_BALANCES);
+    const raw = localStorage.getItem(key);
     if (!raw) {
-      // Jangan timpa Cloud Firestore dengan DEFAULT_BALANCES saat browser baru pertama kali dibuka;
-      // biarkan subscription Cloud Firestore memuat saldo riil dari database terlebih dahulu.
-      return { ...DEFAULT_BALANCES };
+      return { ...fallback };
     }
     const parsed = JSON.parse(raw);
     return {
-      cash: typeof parsed.cash === 'number' ? parsed.cash : DEFAULT_BALANCES.cash,
-      brimo1: typeof parsed.brimo1 === 'number' ? parsed.brimo1 : DEFAULT_BALANCES.brimo1,
-      brimo2: typeof parsed.brimo2 === 'number' ? parsed.brimo2 : DEFAULT_BALANCES.brimo2,
-      dana1: typeof parsed.dana1 === 'number' ? parsed.dana1 : DEFAULT_BALANCES.dana1,
-      dana2: typeof parsed.dana2 === 'number' ? parsed.dana2 : DEFAULT_BALANCES.dana2,
-      seabank: typeof parsed.seabank === 'number' ? parsed.seabank : DEFAULT_BALANCES.seabank,
-      tagihan: typeof parsed.tagihan === 'number' ? parsed.tagihan : (DEFAULT_BALANCES.tagihan ?? 0),
-      hutang: typeof parsed.hutang === 'number' ? parsed.hutang : (DEFAULT_BALANCES.hutang ?? 0),
+      cash: typeof parsed.cash === 'number' ? parsed.cash : fallback.cash,
+      brimo1: typeof parsed.brimo1 === 'number' ? parsed.brimo1 : fallback.brimo1,
+      brimo2: typeof parsed.brimo2 === 'number' ? parsed.brimo2 : fallback.brimo2,
+      dana1: typeof parsed.dana1 === 'number' ? parsed.dana1 : fallback.dana1,
+      dana2: typeof parsed.dana2 === 'number' ? parsed.dana2 : fallback.dana2,
+      seabank: typeof parsed.seabank === 'number' ? parsed.seabank : fallback.seabank,
+      tagihan: typeof parsed.tagihan === 'number' ? parsed.tagihan : (fallback.tagihan ?? 0),
+      hutang: typeof parsed.hutang === 'number' ? parsed.hutang : (fallback.hutang ?? 0),
     };
   } catch (err) {
     console.warn('Gagal membaca saldo akun dari localStorage:', err);
-    return { ...DEFAULT_BALANCES };
+    return { ...fallback };
   }
 }
 
@@ -174,37 +219,49 @@ export function getStoredAccountBalances(): AccountBalances {
  */
 export function saveStoredAccountBalances(
   balances: AccountBalances,
-  syncCloud: boolean = true
+  syncCloud: boolean = true,
+  branchId?: string
 ): void {
-  if (typeof window === 'undefined') return;
-  try {
-    localStorage.setItem(STORAGE_KEY_BALANCES, JSON.stringify(balances));
-    notifyBalancesUpdated(balances);
-    if (syncCloud) {
-      saveAccountBalancesToCloud(balances).catch((err) => {
-        console.warn('Gagal sinkronisasi saldo akun ke Cloud Firestore:', err);
-      });
+  const resolvedBranchId = normalizeBranchId(branchId || getActiveBranchId());
+  if (typeof window !== 'undefined') {
+    const key = getBranchStorageKey(STORAGE_KEY_BALANCES, resolvedBranchId);
+    try {
+      localStorage.setItem(key, JSON.stringify(balances));
+      if (resolvedBranchId === getActiveBranchId()) {
+        notifyBalancesUpdated(balances);
+      }
+    } catch (err) {
+      console.warn('Gagal menyimpan saldo akun ke localStorage:', err);
     }
-  } catch (err) {
-    console.warn('Gagal menyimpan saldo akun ke localStorage:', err);
+  }
+  if (syncCloud) {
+    saveAccountBalancesToCloud(balances, undefined, resolvedBranchId).catch((err) => {
+      console.warn('Gagal sinkronisasi saldo akun ke Cloud Firestore:', err);
+    });
   }
 }
 
 export async function saveStoredAccountBalancesAsync(
   balances: AccountBalances,
   syncCloud: boolean = true,
-  tagihanNote?: string
+  tagihanNote?: string,
+  branchId?: string
 ): Promise<void> {
+  const resolvedBranchId = normalizeBranchId(branchId || getActiveBranchId());
   if (syncCloud) {
-    await saveAccountBalancesToCloud(balances, tagihanNote);
+    await saveAccountBalancesToCloud(balances, tagihanNote, resolvedBranchId);
   }
   if (typeof window !== 'undefined') {
+    const balKey = getBranchStorageKey(STORAGE_KEY_BALANCES, resolvedBranchId);
+    const noteKey = getBranchStorageKey(STORAGE_KEY_TAGIHAN_NOTE, resolvedBranchId);
     try {
-      localStorage.setItem(STORAGE_KEY_BALANCES, JSON.stringify(balances));
+      localStorage.setItem(balKey, JSON.stringify(balances));
       if (tagihanNote !== undefined) {
-        localStorage.setItem(STORAGE_KEY_TAGIHAN_NOTE, tagihanNote);
+        localStorage.setItem(noteKey, tagihanNote);
       }
-      notifyBalancesUpdated(balances);
+      if (resolvedBranchId === getActiveBranchId()) {
+        notifyBalancesUpdated(balances);
+      }
     } catch (err) {
       console.warn('Gagal menyimpan saldo akun ke localStorage:', err);
     }
@@ -214,76 +271,93 @@ export async function saveStoredAccountBalancesAsync(
 /**
  * Update saldo akun spesifik secara manual (via tombol modal Update)
  */
-export function updateAccountBalance(key: FundSourceKey, newAmount: number): AccountBalances {
-  const current = getStoredAccountBalances();
+export function updateAccountBalance(
+  key: FundSourceKey,
+  newAmount: number,
+  branchId?: string
+): AccountBalances {
+  const resolvedBranchId = normalizeBranchId(branchId || getActiveBranchId());
+  const current = getStoredAccountBalances(resolvedBranchId);
   const updated: AccountBalances = {
     ...current,
     [key]: Math.max(0, Math.round(Number(newAmount) || 0)),
   };
-  saveStoredAccountBalances(updated);
+  saveStoredAccountBalances(updated, true, resolvedBranchId);
   return updated;
 }
 
 export async function updateAccountBalanceAsync(
   key: FundSourceKey,
-  newAmount: number
+  newAmount: number,
+  branchId?: string
 ): Promise<AccountBalances> {
-  const current = getStoredAccountBalances();
+  const resolvedBranchId = normalizeBranchId(branchId || getActiveBranchId());
+  const current = getStoredAccountBalances(resolvedBranchId);
   const updated: AccountBalances = {
     ...current,
     [key]: Math.max(0, Math.round(Number(newAmount) || 0)),
   };
-  await saveStoredAccountBalancesAsync(updated, true);
+  await saveStoredAccountBalancesAsync(updated, true, undefined, resolvedBranchId);
   return updated;
 }
 
 /**
  * Menambah atau mengurangi saldo Brimo 1 secara langsung (misalnya sinkronisasi Card Titipan)
  */
-export function adjustBrimo1Balance(deltaAmount: number): AccountBalances {
-  const current = getStoredAccountBalances();
+export function adjustBrimo1Balance(deltaAmount: number, branchId?: string): AccountBalances {
+  const resolvedBranchId = normalizeBranchId(branchId || getActiveBranchId());
+  const current = getStoredAccountBalances(resolvedBranchId);
   const delta = Math.round(Number(deltaAmount) || 0);
   const updated: AccountBalances = {
     ...current,
     brimo1: Math.max(0, (Number(current.brimo1) || 0) + delta),
   };
-  saveStoredAccountBalances(updated);
+  saveStoredAccountBalances(updated, true, resolvedBranchId);
   return updated;
 }
 
-export async function adjustBrimo1BalanceAsync(deltaAmount: number): Promise<AccountBalances> {
-  const current = getStoredAccountBalances();
+export async function adjustBrimo1BalanceAsync(
+  deltaAmount: number,
+  branchId?: string
+): Promise<AccountBalances> {
+  const resolvedBranchId = normalizeBranchId(branchId || getActiveBranchId());
+  const current = getStoredAccountBalances(resolvedBranchId);
   const delta = Math.round(Number(deltaAmount) || 0);
   const updated: AccountBalances = {
     ...current,
     brimo1: Math.max(0, (Number(current.brimo1) || 0) + delta),
   };
-  await saveStoredAccountBalancesAsync(updated, true);
+  await saveStoredAccountBalancesAsync(updated, true, undefined, resolvedBranchId);
   return updated;
 }
 
 /**
  * Menambah atau mengurangi saldo Cash secara langsung (misalnya pencairan Tarik Tunai Card Titipan)
  */
-export function adjustCashBalance(deltaAmount: number): AccountBalances {
-  const current = getStoredAccountBalances();
+export function adjustCashBalance(deltaAmount: number, branchId?: string): AccountBalances {
+  const resolvedBranchId = normalizeBranchId(branchId || getActiveBranchId());
+  const current = getStoredAccountBalances(resolvedBranchId);
   const delta = Math.round(Number(deltaAmount) || 0);
   const updated: AccountBalances = {
     ...current,
     cash: Math.max(0, (Number(current.cash) || 0) + delta),
   };
-  saveStoredAccountBalances(updated);
+  saveStoredAccountBalances(updated, true, resolvedBranchId);
   return updated;
 }
 
-export async function adjustCashBalanceAsync(deltaAmount: number): Promise<AccountBalances> {
-  const current = getStoredAccountBalances();
+export async function adjustCashBalanceAsync(
+  deltaAmount: number,
+  branchId?: string
+): Promise<AccountBalances> {
+  const resolvedBranchId = normalizeBranchId(branchId || getActiveBranchId());
+  const current = getStoredAccountBalances(resolvedBranchId);
   const delta = Math.round(Number(deltaAmount) || 0);
   const updated: AccountBalances = {
     ...current,
     cash: Math.max(0, (Number(current.cash) || 0) + delta),
   };
-  await saveStoredAccountBalancesAsync(updated, true);
+  await saveStoredAccountBalancesAsync(updated, true, undefined, resolvedBranchId);
   return updated;
 }
 
@@ -294,6 +368,7 @@ function computeTransferBetweenBalances(params: {
   adminBankCost?: number;
   adminTransferFee?: number;
   adminStoreFee?: number;
+  branchId?: string;
 }): { success: boolean; balances: AccountBalances; message?: string } {
   const {
     sourceKey,
@@ -302,17 +377,19 @@ function computeTransferBetweenBalances(params: {
     adminBankCost = 0,
     adminTransferFee = 0,
     adminStoreFee = 0,
+    branchId,
   } = params;
+  const resolvedBranchId = normalizeBranchId(branchId || getActiveBranchId());
 
   if (sourceKey === targetKey) {
     return {
       success: false,
-      balances: getStoredAccountBalances(),
+      balances: getStoredAccountBalances(resolvedBranchId),
       message: 'Sumber dana asal dan tujuan tidak boleh sama.',
     };
   }
 
-  const current = getStoredAccountBalances();
+  const current = getStoredAccountBalances(resolvedBranchId);
   const sourceBalance = current[sourceKey] ?? 0;
   const numTransfer = Math.max(0, Math.round(Number(transferAmount) || 0));
   const numBankCost = Math.max(0, Math.round(Number(adminBankCost) || 0));
@@ -346,7 +423,6 @@ function computeTransferBetweenBalances(params: {
 
 /**
  * Transfer saldo antar sumber dana (Ambil saldo dari card lain)
- * Mengurangi saldo akun sumber (termasuk biaya transfer bank jika ada) dan menambah saldo akun tujuan secara real-time
  */
 export function transferBetweenAccountBalances(params: {
   sourceKey: FundSourceKey;
@@ -355,10 +431,12 @@ export function transferBetweenAccountBalances(params: {
   adminBankCost?: number;
   adminTransferFee?: number;
   adminStoreFee?: number;
+  branchId?: string;
 }): { success: boolean; balances: AccountBalances; message?: string } {
-  const res = computeTransferBetweenBalances(params);
+  const resolvedBranchId = normalizeBranchId(params.branchId || getActiveBranchId());
+  const res = computeTransferBetweenBalances({ ...params, branchId: resolvedBranchId });
   if (res.success) {
-    saveStoredAccountBalances(res.balances);
+    saveStoredAccountBalances(res.balances, true, resolvedBranchId);
   }
   return res;
 }
@@ -371,13 +449,165 @@ export async function transferBetweenAccountBalancesAsync(params: {
   adminTransferFee?: number;
   adminStoreFee?: number;
   tagihanNote?: string;
+  branchId?: string;
 }): Promise<{ success: boolean; balances: AccountBalances; message?: string }> {
-  const res = computeTransferBetweenBalances(params);
+  const resolvedBranchId = normalizeBranchId(params.branchId || getActiveBranchId());
+  const res = computeTransferBetweenBalances({ ...params, branchId: resolvedBranchId });
   if (!res.success) return res;
-  await saveStoredAccountBalancesAsync(res.balances, true, params.tagihanNote);
+  await saveStoredAccountBalancesAsync(res.balances, true, params.tagihanNote, resolvedBranchId);
   return res;
 }
 
+/**
+ * Eksekusi instan Mutasi / Drop Modal Antar Cabang (Khusus Owner)
+ * Memotong saldo pengirim (nominal + biaya admin bank) di cabang asal dan menambah saldo penerima (nominal) di cabang tujuan,
+ * lalu mencatat transaksi berpasangan (`transfer_cabang_keluar` & `transfer_cabang_masuk`) ke Cloud Firestore.
+ */
+export async function executeInterBranchTransferAsync(params: {
+  fromBranchId: string;
+  fromBranchName: string;
+  fromSourceKey: InternalFundKey;
+  toBranchId: string;
+  toBranchName: string;
+  toSourceKey: InternalFundKey;
+  nominal: number;
+  adminBankCost?: number;
+  notes?: string;
+  operatorName: string;
+  cashierUid?: string;
+}): Promise<{
+  success: boolean;
+  message?: string;
+  outTx?: DigitalTransaction;
+  inTx?: DigitalTransaction;
+}> {
+  const fromBranch = normalizeBranchId(params.fromBranchId);
+  const toBranch = normalizeBranchId(params.toBranchId);
+  const numNominal = Math.max(0, Math.round(Number(params.nominal) || 0));
+  const numBankCost = Math.max(0, Math.round(Number(params.adminBankCost) || 0));
+
+  if (fromBranch === toBranch) {
+    return {
+      success: false,
+      message: 'Cabang asal dan cabang tujuan harus berbeda. Gunakan Transfer Antar Card untuk pindah saldo dalam cabang yang sama.',
+    };
+  }
+  if (numNominal <= 0) {
+    return {
+      success: false,
+      message: 'Nominal drop modal / mutasi cabang harus lebih dari Rp 0.',
+    };
+  }
+
+  const [fromCloud, toCloud] = await Promise.all([
+    fetchAccountBalancesFromCloud(fromBranch),
+    fetchAccountBalancesFromCloud(toBranch),
+  ]);
+
+  const fromBalances: AccountBalances =
+    fromCloud.exists && fromCloud.balances
+      ? fromCloud.balances
+      : getStoredAccountBalances(fromBranch);
+
+  const toBalances: AccountBalances =
+    toCloud.exists && toCloud.balances
+      ? toCloud.balances
+      : getDefaultBalancesForBranch(toBranch);
+
+  const sourceBalance = Number(fromBalances[params.fromSourceKey] || 0);
+  const totalDeducted = numNominal + numBankCost;
+
+  if (sourceBalance < totalDeducted) {
+    return {
+      success: false,
+      message: `Saldo ${getFundSourceLabel(params.fromSourceKey)} di cabang ${params.fromBranchName} tidak mencukupi (Tersedia: Rp ${sourceBalance.toLocaleString('id-ID')}, Dibutuhkan: Rp ${totalDeducted.toLocaleString('id-ID')}).`,
+    };
+  }
+
+  const nextFromBalances: AccountBalances = {
+    ...fromBalances,
+    [params.fromSourceKey]: Math.max(0, sourceBalance - totalDeducted),
+  };
+  const nextToBalances: AccountBalances = {
+    ...toBalances,
+    [params.toSourceKey]: (Number(toBalances[params.toSourceKey]) || 0) + numNominal,
+  };
+
+  await saveAccountBalancesToCloud(nextFromBalances, undefined, fromBranch);
+  try {
+    await saveAccountBalancesToCloud(nextToBalances, undefined, toBranch);
+  } catch (err) {
+    // Rollback saldo pengirim jika penyimpanan saldo cabang tujuan gagal
+    await saveAccountBalancesToCloud(fromBalances, undefined, fromBranch).catch(() => {});
+    throw err;
+  }
+
+  const nowIso = new Date().toISOString();
+  const baseId = Date.now();
+  const pairCode = Math.random().toString(36).slice(2, 6).toUpperCase();
+  const fromLabel = getFundSourceLabel(params.fromSourceKey);
+  const toLabel = getFundSourceLabel(params.toSourceKey);
+  const cleanNote = (params.notes || '').trim();
+  const opName = (params.operatorName || 'Owner').trim();
+
+  const outTx: DigitalTransaction = {
+    id: baseId,
+    type: 'transfer_cabang_keluar',
+    provider: `${params.fromBranchName} (${fromLabel}) ➔ ${params.toBranchName} (${toLabel})`,
+    targetAccount: `${params.toBranchName} - ${toLabel}`,
+    customerName: `Drop Modal ke ${params.toBranchName}`,
+    nominal: numNominal,
+    adminBankCost: numBankCost,
+    adminStoreFee: 0,
+    totalCustomerPaid: numNominal,
+    profit: -numBankCost,
+    paymentMethod: 'transfer_cabang',
+    fundSource: fromLabel,
+    operatorName: opName,
+    referenceNumber: `MCB-OUT-${baseId}-${pairCode}`,
+    status: 'success',
+    cashierUid: params.cashierUid || undefined,
+    branchId: fromBranch,
+    notes: `${cleanNote ? `${cleanNote} | ` : ''}[Mutasi Cabang Keluar] [Sumber: ${fromLabel}] [Ke Cabang: ${params.toBranchName} (${toLabel})] [Operator: ${opName}]`,
+    createdAt: nowIso,
+  };
+
+  const inTx: DigitalTransaction = {
+    id: baseId + 1,
+    type: 'transfer_cabang_masuk',
+    provider: `${params.fromBranchName} (${fromLabel}) ➔ ${params.toBranchName} (${toLabel})`,
+    targetAccount: toLabel,
+    customerName: `Terima Modal dari ${params.fromBranchName}`,
+    nominal: numNominal,
+    adminBankCost: 0,
+    adminStoreFee: 0,
+    totalCustomerPaid: numNominal,
+    profit: 0,
+    paymentMethod: 'transfer_cabang',
+    fundSource: toLabel,
+    operatorName: opName,
+    referenceNumber: `MCB-IN-${baseId + 1}-${pairCode}`,
+    status: 'success',
+    cashierUid: params.cashierUid || undefined,
+    branchId: toBranch,
+    notes: `${cleanNote ? `${cleanNote} | ` : ''}[Mutasi Cabang Masuk] [Tujuan: ${toLabel}] [Dari Cabang: ${params.fromBranchName} (${fromLabel})] [Operator: ${opName}]`,
+    createdAt: nowIso,
+  };
+
+  await Promise.all([
+    saveDigitalTransactionToCloud(outTx),
+    saveDigitalTransactionToCloud(inTx),
+  ]);
+
+  saveStoredAccountBalances(nextFromBalances, false, fromBranch);
+  saveStoredAccountBalances(nextToBalances, false, toBranch);
+
+  return {
+    success: true,
+    outTx,
+    inTx,
+  };
+}
 
 /**
  * Hitung Total Saldo yang dihitung dari Cash sampai dengan Dana 2:
@@ -457,9 +687,11 @@ function computeTransactionBalanceDeduction(params: {
   adminStoreFee?: number;
   totalCustomerPaid: number;
   paymentMethod: string;
+  branchId?: string;
 }): AccountBalances {
-  const { fundSourceKey, provider, type, nominal, adminBankCost = 0, adminStoreFee = 0, totalCustomerPaid, paymentMethod } = params;
-  const current = getStoredAccountBalances();
+  const { fundSourceKey, provider, type, nominal, adminBankCost = 0, adminStoreFee = 0, totalCustomerPaid, paymentMethod, branchId } = params;
+  const resolvedBranchId = normalizeBranchId(branchId || getActiveBranchId());
+  const current = getStoredAccountBalances(resolvedBranchId);
   const updated = { ...current };
 
   const isTarikTunai = type.includes('tarik') || type.includes('cashout');
@@ -532,9 +764,11 @@ export function processTransactionBalanceDeduction(params: {
   adminStoreFee?: number;
   totalCustomerPaid: number;
   paymentMethod: string;
+  branchId?: string;
 }): AccountBalances {
-  const updated = computeTransactionBalanceDeduction(params);
-  saveStoredAccountBalances(updated);
+  const resolvedBranchId = normalizeBranchId(params.branchId || getActiveBranchId());
+  const updated = computeTransactionBalanceDeduction({ ...params, branchId: resolvedBranchId });
+  saveStoredAccountBalances(updated, true, resolvedBranchId);
   return updated;
 }
 
@@ -547,9 +781,11 @@ export async function processTransactionBalanceDeductionAsync(params: {
   adminStoreFee?: number;
   totalCustomerPaid: number;
   paymentMethod: string;
+  branchId?: string;
 }): Promise<AccountBalances> {
-  const updated = computeTransactionBalanceDeduction(params);
-  await saveStoredAccountBalancesAsync(updated, true);
+  const resolvedBranchId = normalizeBranchId(params.branchId || getActiveBranchId());
+  const updated = computeTransactionBalanceDeduction({ ...params, branchId: resolvedBranchId });
+  await saveStoredAccountBalancesAsync(updated, true, undefined, resolvedBranchId);
   return updated;
 }
 
@@ -566,10 +802,13 @@ function computeSettleHutangTransactionBalance(
     nominal?: number;
     adminStoreFee?: number;
     totalCustomerPaid?: number;
+    branchId?: string;
   },
-  receiverAccountKey: HutangReceiverAccountKey = 'cash'
+  receiverAccountKey: HutangReceiverAccountKey = 'cash',
+  branchId?: string
 ): AccountBalances {
-  const current = getStoredAccountBalances();
+  const resolvedBranchId = normalizeBranchId(branchId || tx.branchId || getActiveBranchId());
+  const current = getStoredAccountBalances(resolvedBranchId);
   const updated: AccountBalances = { ...current };
   const settleAmount = getTransactionHutangAmount(tx);
   const validTargets: HutangReceiverAccountKey[] = [
@@ -600,11 +839,14 @@ export function settleHutangTransactionBalance(
     nominal?: number;
     adminStoreFee?: number;
     totalCustomerPaid?: number;
+    branchId?: string;
   },
-  receiverAccountKey: HutangReceiverAccountKey = 'cash'
+  receiverAccountKey: HutangReceiverAccountKey = 'cash',
+  branchId?: string
 ): AccountBalances {
-  const updated = computeSettleHutangTransactionBalance(tx, receiverAccountKey);
-  saveStoredAccountBalances(updated);
+  const resolvedBranchId = normalizeBranchId(branchId || tx.branchId || getActiveBranchId());
+  const updated = computeSettleHutangTransactionBalance(tx, receiverAccountKey, resolvedBranchId);
+  saveStoredAccountBalances(updated, true, resolvedBranchId);
   return updated;
 }
 
@@ -616,11 +858,14 @@ export async function settleHutangTransactionBalanceAsync(
     nominal?: number;
     adminStoreFee?: number;
     totalCustomerPaid?: number;
+    branchId?: string;
   },
-  receiverAccountKey: HutangReceiverAccountKey = 'cash'
+  receiverAccountKey: HutangReceiverAccountKey = 'cash',
+  branchId?: string
 ): Promise<AccountBalances> {
-  const updated = computeSettleHutangTransactionBalance(tx, receiverAccountKey);
-  await saveStoredAccountBalancesAsync(updated, true);
+  const resolvedBranchId = normalizeBranchId(branchId || tx.branchId || getActiveBranchId());
+  const updated = computeSettleHutangTransactionBalance(tx, receiverAccountKey, resolvedBranchId);
+  await saveStoredAccountBalancesAsync(updated, true, undefined, resolvedBranchId);
   return updated;
 }
 
@@ -644,10 +889,12 @@ export function isTagihanTransaction(tx?: {
  * Lunasi catatan Card Tagihan:
  * Mengurangi saldo pada Card Tagihan dan memasukkan dana pelunasan ke Card Cash
  */
-export function settleTagihanTransactionBalance(tx: {
-  nominal?: number;
-}): AccountBalances {
-  const current = getStoredAccountBalances();
+export function settleTagihanTransactionBalance(
+  tx: { nominal?: number; branchId?: string },
+  branchId?: string
+): AccountBalances {
+  const resolvedBranchId = normalizeBranchId(branchId || tx?.branchId || getActiveBranchId());
+  const current = getStoredAccountBalances(resolvedBranchId);
   const updated: AccountBalances = { ...current };
   const settleAmount = Math.max(0, Math.round(Number(tx?.nominal) || 0));
 
@@ -656,17 +903,19 @@ export function settleTagihanTransactionBalance(tx: {
     updated.cash = (updated.cash || 0) + settleAmount;
   }
 
-  saveStoredAccountBalances(updated);
+  saveStoredAccountBalances(updated, true, resolvedBranchId);
   if ((updated.tagihan || 0) <= 0) {
-    saveStoredTagihanNote('');
+    saveStoredTagihanNote('', true, resolvedBranchId);
   }
   return updated;
 }
 
-export async function settleTagihanTransactionBalanceAsync(tx: {
-  nominal?: number;
-}): Promise<AccountBalances> {
-  const current = getStoredAccountBalances();
+export async function settleTagihanTransactionBalanceAsync(
+  tx: { nominal?: number; branchId?: string },
+  branchId?: string
+): Promise<AccountBalances> {
+  const resolvedBranchId = normalizeBranchId(branchId || tx?.branchId || getActiveBranchId());
+  const current = getStoredAccountBalances(resolvedBranchId);
   const updated: AccountBalances = { ...current };
   const settleAmount = Math.max(0, Math.round(Number(tx?.nominal) || 0));
 
@@ -676,7 +925,7 @@ export async function settleTagihanTransactionBalanceAsync(tx: {
   }
 
   const nextNote = (updated.tagihan || 0) <= 0 ? '' : undefined;
-  await saveStoredAccountBalancesAsync(updated, true, nextNote);
+  await saveStoredAccountBalancesAsync(updated, true, nextNote, resolvedBranchId);
   return updated;
 }
 
@@ -733,7 +982,6 @@ export function parseFundSourceKey(
   if (candidate.includes('seabank') || candidate.includes('sea bank') || candidate === 'sea') return 'seabank';
   if (candidate.includes('tagihan') || candidate.includes('bon') || candidate.includes('piutang')) return 'tagihan';
 
-  // Coba ekstrak dari notes jika tersimpan di catatan transaksi: [Sumber: ...] atau [Sumber Dana: ...]
   if (notes) {
     const match = notes.match(/\[Sumber(?:\s*Dana)?:\s*([^\]]+)\]/i);
     if (match && match[1]) {
@@ -760,7 +1008,6 @@ export function parseFundSourceKey(
     }
   }
 
-  // Fallback berdasarkan jenis transaksi
   const t = (type || '').toLowerCase();
   if (t.includes('tarik') || t.includes('cashout')) return 'cash';
   if (t.includes('dana') || t.includes('ewallet') || t.includes('topup')) return 'dana1';
@@ -769,7 +1016,6 @@ export function parseFundSourceKey(
 
 /**
  * Kembalikan saldo akun secara otomatis saat transaksi keagenan dihapus (Refund / Reversal)
- * Berlaku universal untuk seluruh jenis transaksi: Transfer Bank, Tarik Tunai, Top Up E-Wallet, dan PPOB & Lainnya.
  */
 function computeRollbackTransactionBalance(params: {
   fundSourceKey?: FundSourceKey | string;
@@ -782,6 +1028,7 @@ function computeRollbackTransactionBalance(params: {
   nominal: number;
   totalCustomerPaid?: number;
   paymentMethod?: string;
+  branchId?: string;
 }): { changed: boolean; balances: AccountBalances; clearTagihanNote?: boolean } {
   const {
     fundSourceKey,
@@ -794,9 +1041,11 @@ function computeRollbackTransactionBalance(params: {
     nominal,
     totalCustomerPaid,
     paymentMethod,
+    branchId,
   } = params;
 
-  const current = getStoredAccountBalances();
+  const resolvedBranchId = normalizeBranchId(branchId || getActiveBranchId());
+  const current = getStoredAccountBalances(resolvedBranchId);
   const updated = { ...current };
 
   const numNominal = Math.max(0, Number(nominal) || 0);
@@ -815,6 +1064,22 @@ function computeRollbackTransactionBalance(params: {
 
   if (t.startsWith('titipan') || n.includes('[titipan]')) {
     return { changed: false, balances: updated };
+  }
+
+  if (t === 'transfer_cabang_keluar') {
+    const sourceKey: FundSourceKey = parseFundSourceKey(fundSourceKey, notes, type);
+    if (sourceKey !== 'atm_pelanggan') {
+      updated[sourceKey] = (updated[sourceKey] || 0) + numNominal + numBankCost;
+    }
+    return { changed: true, balances: updated };
+  }
+
+  if (t === 'transfer_cabang_masuk') {
+    const destKey: FundSourceKey = parseFundSourceKey(targetAccount || fundSourceKey, notes, type);
+    if (destKey !== 'atm_pelanggan') {
+      updated[destKey] = Math.max(0, (updated[destKey] || 0) - numNominal);
+    }
+    return { changed: true, balances: updated };
   }
 
   if (
@@ -990,14 +1255,15 @@ export function rollbackTransactionBalance(params: {
   nominal: number;
   totalCustomerPaid?: number;
   paymentMethod?: string;
+  branchId?: string;
 }): AccountBalances {
-  const res = computeRollbackTransactionBalance(params);
+  const resolvedBranchId = normalizeBranchId(params.branchId || getActiveBranchId());
+  const res = computeRollbackTransactionBalance({ ...params, branchId: resolvedBranchId });
   if (res.changed) {
-    saveStoredAccountBalances(res.balances);
+    saveStoredAccountBalances(res.balances, true, resolvedBranchId);
     if (res.clearTagihanNote) {
-      saveStoredTagihanNote('');
+      saveStoredTagihanNote('', true, resolvedBranchId);
     }
-    notifyBalancesUpdated(res.balances);
   }
   return res.balances;
 }
@@ -1013,13 +1279,16 @@ export async function rollbackTransactionBalanceAsync(params: {
   nominal: number;
   totalCustomerPaid?: number;
   paymentMethod?: string;
+  branchId?: string;
 }): Promise<AccountBalances> {
-  const res = computeRollbackTransactionBalance(params);
+  const resolvedBranchId = normalizeBranchId(params.branchId || getActiveBranchId());
+  const res = computeRollbackTransactionBalance({ ...params, branchId: resolvedBranchId });
   if (res.changed) {
     await saveStoredAccountBalancesAsync(
       res.balances,
       true,
-      res.clearTagihanNote ? '' : undefined
+      res.clearTagihanNote ? '' : undefined,
+      resolvedBranchId
     );
   }
   return res.balances;
@@ -1110,20 +1379,22 @@ export function getLocalDateKey(input: Date | string = new Date()): string {
   return `${y}-${m}-${day}`;
 }
 
-export function getStoredMarginFeeLedger(): MarginFeeLedgerState {
+export function getStoredMarginFeeLedger(branchId?: string): MarginFeeLedgerState {
   const todayKey = getLocalDateKey();
+  const resolvedBranchId = normalizeBranchId(branchId || getActiveBranchId());
   if (typeof window === 'undefined') {
     return { baselineDateKey: todayKey, takenByDate: {}, history: [] };
   }
+  const key = getBranchStorageKey(STORAGE_KEY_MARGIN_FEE_LEDGER, resolvedBranchId);
   try {
-    const raw = localStorage.getItem(STORAGE_KEY_MARGIN_FEE_LEDGER);
+    const raw = localStorage.getItem(key);
     if (!raw) {
       const initial: MarginFeeLedgerState = {
         baselineDateKey: todayKey,
         takenByDate: {},
         history: [],
       };
-      localStorage.setItem(STORAGE_KEY_MARGIN_FEE_LEDGER, JSON.stringify(initial));
+      localStorage.setItem(key, JSON.stringify(initial));
       return initial;
     }
     const parsed = JSON.parse(raw);
@@ -1143,33 +1414,44 @@ export function getStoredMarginFeeLedger(): MarginFeeLedgerState {
 
 export function saveStoredMarginFeeLedger(
   ledger: MarginFeeLedgerState,
-  syncCloud: boolean = true
+  syncCloud: boolean = true,
+  branchId?: string
 ): void {
-  if (typeof window === 'undefined') return;
-  try {
-    localStorage.setItem(STORAGE_KEY_MARGIN_FEE_LEDGER, JSON.stringify(ledger));
-    window.dispatchEvent(new CustomEvent(EVENT_MARGIN_FEE_UPDATED, { detail: ledger }));
-    if (syncCloud) {
-      saveMarginFeeLedgerToCloud(ledger).catch((err) => {
-        console.warn('Gagal sinkronisasi ledger Margin Fee ke Cloud Firestore:', err);
-      });
+  const resolvedBranchId = normalizeBranchId(branchId || getActiveBranchId());
+  if (typeof window !== 'undefined') {
+    const key = getBranchStorageKey(STORAGE_KEY_MARGIN_FEE_LEDGER, resolvedBranchId);
+    try {
+      localStorage.setItem(key, JSON.stringify(ledger));
+      if (resolvedBranchId === getActiveBranchId()) {
+        window.dispatchEvent(new CustomEvent(EVENT_MARGIN_FEE_UPDATED, { detail: ledger }));
+      }
+    } catch (err) {
+      console.warn('Gagal menyimpan catatan pengambilan margin fee:', err);
     }
-  } catch (err) {
-    console.warn('Gagal menyimpan catatan pengambilan margin fee:', err);
+  }
+  if (syncCloud) {
+    saveMarginFeeLedgerToCloud(ledger, resolvedBranchId).catch((err) => {
+      console.warn('Gagal sinkronisasi ledger Margin Fee ke Cloud Firestore:', err);
+    });
   }
 }
 
 export async function saveStoredMarginFeeLedgerAsync(
   ledger: MarginFeeLedgerState,
-  syncCloud: boolean = true
+  syncCloud: boolean = true,
+  branchId?: string
 ): Promise<void> {
+  const resolvedBranchId = normalizeBranchId(branchId || getActiveBranchId());
   if (syncCloud) {
-    await saveMarginFeeLedgerToCloud(ledger);
+    await saveMarginFeeLedgerToCloud(ledger, resolvedBranchId);
   }
   if (typeof window !== 'undefined') {
+    const key = getBranchStorageKey(STORAGE_KEY_MARGIN_FEE_LEDGER, resolvedBranchId);
     try {
-      localStorage.setItem(STORAGE_KEY_MARGIN_FEE_LEDGER, JSON.stringify(ledger));
-      window.dispatchEvent(new CustomEvent(EVENT_MARGIN_FEE_UPDATED, { detail: ledger }));
+      localStorage.setItem(key, JSON.stringify(ledger));
+      if (resolvedBranchId === getActiveBranchId()) {
+        window.dispatchEvent(new CustomEvent(EVENT_MARGIN_FEE_UPDATED, { detail: ledger }));
+      }
     } catch (err) {
       console.warn('Gagal menyimpan catatan pengambilan margin fee:', err);
     }
@@ -1256,6 +1538,7 @@ function computeTakeMarginFeeFromCash(params: {
   includeToday: boolean;
   includePrevious: boolean;
   takenBy: string;
+  branchId?: string;
 }): {
   success: boolean;
   message?: string;
@@ -1263,9 +1546,10 @@ function computeTakeMarginFeeFromCash(params: {
   ledger: MarginFeeLedgerState;
   record?: MarginFeeWithdrawalRecord;
 } {
-  const { summary, includeToday, includePrevious, takenBy } = params;
-  const currentBalances = getStoredAccountBalances();
-  const currentLedger = getStoredMarginFeeLedger();
+  const { summary, includeToday, includePrevious, takenBy, branchId } = params;
+  const resolvedBranchId = normalizeBranchId(branchId || getActiveBranchId());
+  const currentBalances = getStoredAccountBalances(resolvedBranchId);
+  const currentLedger = getStoredMarginFeeLedger(resolvedBranchId);
 
   const todayPortion = includeToday ? Math.max(0, summary.todayRemainingFee) : 0;
   const previousPortion = includePrevious ? Math.max(0, summary.previousUnclaimedFee) : 0;
@@ -1339,6 +1623,7 @@ export function takeMarginFeeFromCash(params: {
   includeToday: boolean;
   includePrevious: boolean;
   takenBy: string;
+  branchId?: string;
 }): {
   success: boolean;
   message?: string;
@@ -1346,10 +1631,11 @@ export function takeMarginFeeFromCash(params: {
   ledger: MarginFeeLedgerState;
   record?: MarginFeeWithdrawalRecord;
 } {
-  const res = computeTakeMarginFeeFromCash(params);
+  const resolvedBranchId = normalizeBranchId(params.branchId || getActiveBranchId());
+  const res = computeTakeMarginFeeFromCash({ ...params, branchId: resolvedBranchId });
   if (!res.success) return res;
-  saveStoredAccountBalances(res.balances);
-  saveStoredMarginFeeLedger(res.ledger);
+  saveStoredAccountBalances(res.balances, true, resolvedBranchId);
+  saveStoredMarginFeeLedger(res.ledger, true, resolvedBranchId);
   return res;
 }
 
@@ -1358,6 +1644,7 @@ export async function takeMarginFeeFromCashAsync(params: {
   includeToday: boolean;
   includePrevious: boolean;
   takenBy: string;
+  branchId?: string;
 }): Promise<{
   success: boolean;
   message?: string;
@@ -1365,11 +1652,12 @@ export async function takeMarginFeeFromCashAsync(params: {
   ledger: MarginFeeLedgerState;
   record?: MarginFeeWithdrawalRecord;
 }> {
-  const res = computeTakeMarginFeeFromCash(params);
+  const resolvedBranchId = normalizeBranchId(params.branchId || getActiveBranchId());
+  const res = computeTakeMarginFeeFromCash({ ...params, branchId: resolvedBranchId });
   if (!res.success) return res;
   await Promise.all([
-    saveStoredAccountBalancesAsync(res.balances, true),
-    saveStoredMarginFeeLedgerAsync(res.ledger, true),
+    saveStoredAccountBalancesAsync(res.balances, true, undefined, resolvedBranchId),
+    saveStoredMarginFeeLedgerAsync(res.ledger, true, resolvedBranchId),
   ]);
   return res;
 }
@@ -1382,10 +1670,12 @@ function computeReconciledMarginFeeLedger(
     profit?: number;
     paymentMethod?: string;
     status?: string;
-  }>
+  }>,
+  branchId?: string
 ): MarginFeeLedgerState | null {
   if (!dateKey) return null;
-  const currentLedger = getStoredMarginFeeLedger();
+  const resolvedBranchId = normalizeBranchId(branchId || getActiveBranchId());
+  const currentLedger = getStoredMarginFeeLedger(resolvedBranchId);
   const prevTaken = Math.max(0, Math.round(currentLedger.takenByDate[dateKey] || 0));
   if (prevTaken <= 0) return null;
 
@@ -1419,10 +1709,6 @@ function computeReconciledMarginFeeLedger(
   };
 }
 
-/**
- * Sesuaikan catatan takenByDate saat transaksi dihapus agar tidak menyisakan
- * potongan fiktif yang menelan Margin Fee transaksi berikutnya.
- */
 export function reconcileMarginFeeLedgerAfterDelete(
   dateKey: string,
   remainingTransactions: Array<{
@@ -1431,11 +1717,17 @@ export function reconcileMarginFeeLedgerAfterDelete(
     profit?: number;
     paymentMethod?: string;
     status?: string;
-  }>
+  }>,
+  branchId?: string
 ): void {
-  const updatedLedger = computeReconciledMarginFeeLedger(dateKey, remainingTransactions);
+  const resolvedBranchId = normalizeBranchId(branchId || getActiveBranchId());
+  const updatedLedger = computeReconciledMarginFeeLedger(
+    dateKey,
+    remainingTransactions,
+    resolvedBranchId
+  );
   if (updatedLedger) {
-    saveStoredMarginFeeLedger(updatedLedger, true);
+    saveStoredMarginFeeLedger(updatedLedger, true, resolvedBranchId);
   }
 }
 
@@ -1447,11 +1739,17 @@ export async function reconcileMarginFeeLedgerAfterDeleteAsync(
     profit?: number;
     paymentMethod?: string;
     status?: string;
-  }>
+  }>,
+  branchId?: string
 ): Promise<void> {
-  const updatedLedger = computeReconciledMarginFeeLedger(dateKey, remainingTransactions);
+  const resolvedBranchId = normalizeBranchId(branchId || getActiveBranchId());
+  const updatedLedger = computeReconciledMarginFeeLedger(
+    dateKey,
+    remainingTransactions,
+    resolvedBranchId
+  );
   if (updatedLedger) {
-    await saveStoredMarginFeeLedgerAsync(updatedLedger, true);
+    await saveStoredMarginFeeLedgerAsync(updatedLedger, true, resolvedBranchId);
   }
 }
 
@@ -1472,14 +1770,13 @@ function resolveExpensePaidByKey(paidByKey: string): FundSourceKey {
     : 'cash';
 }
 
-/**
- * Potong saldo card sumber dana saat pengeluaran kas toko dicatat
- */
 export function processExpenseBalanceDeduction(
   paidByKey: string,
-  amount: number
+  amount: number,
+  branchId?: string
 ): { success: boolean; balances: AccountBalances; message?: string } {
-  const current = getStoredAccountBalances();
+  const resolvedBranchId = normalizeBranchId(branchId || getActiveBranchId());
+  const current = getStoredAccountBalances(resolvedBranchId);
   const validKey = resolveExpensePaidByKey(paidByKey);
   const numAmount = Math.max(0, Math.round(Number(amount) || 0));
   const currentBal = current[validKey] || 0;
@@ -1497,7 +1794,7 @@ export function processExpenseBalanceDeduction(
     [validKey]: Math.max(0, currentBal - numAmount),
   };
 
-  saveStoredAccountBalances(updated);
+  saveStoredAccountBalances(updated, true, resolvedBranchId);
   return {
     success: true,
     balances: updated,
@@ -1506,9 +1803,11 @@ export function processExpenseBalanceDeduction(
 
 export async function processExpenseBalanceDeductionAsync(
   paidByKey: string,
-  amount: number
+  amount: number,
+  branchId?: string
 ): Promise<{ success: boolean; balances: AccountBalances; message?: string }> {
-  const current = getStoredAccountBalances();
+  const resolvedBranchId = normalizeBranchId(branchId || getActiveBranchId());
+  const current = getStoredAccountBalances(resolvedBranchId);
   const validKey = resolveExpensePaidByKey(paidByKey);
   const numAmount = Math.max(0, Math.round(Number(amount) || 0));
   const currentBal = current[validKey] || 0;
@@ -1526,21 +1825,20 @@ export async function processExpenseBalanceDeductionAsync(
     [validKey]: Math.max(0, currentBal - numAmount),
   };
 
-  await saveStoredAccountBalancesAsync(updated, true);
+  await saveStoredAccountBalancesAsync(updated, true, undefined, resolvedBranchId);
   return {
     success: true,
     balances: updated,
   };
 }
 
-/**
- * Kembalikan saldo card sumber dana saat pengeluaran kas toko dihapus
- */
 export function processExpenseBalanceRefund(
   paidByKey: string,
-  amount: number
+  amount: number,
+  branchId?: string
 ): AccountBalances {
-  const current = getStoredAccountBalances();
+  const resolvedBranchId = normalizeBranchId(branchId || getActiveBranchId());
+  const current = getStoredAccountBalances(resolvedBranchId);
   const validKey = resolveExpensePaidByKey(paidByKey);
   const numAmount = Math.max(0, Math.round(Number(amount) || 0));
   const updated: AccountBalances = {
@@ -1548,15 +1846,17 @@ export function processExpenseBalanceRefund(
     [validKey]: (current[validKey] || 0) + numAmount,
   };
 
-  saveStoredAccountBalances(updated);
+  saveStoredAccountBalances(updated, true, resolvedBranchId);
   return updated;
 }
 
 export async function processExpenseBalanceRefundAsync(
   paidByKey: string,
-  amount: number
+  amount: number,
+  branchId?: string
 ): Promise<AccountBalances> {
-  const current = getStoredAccountBalances();
+  const resolvedBranchId = normalizeBranchId(branchId || getActiveBranchId());
+  const current = getStoredAccountBalances(resolvedBranchId);
   const validKey = resolveExpensePaidByKey(paidByKey);
   const numAmount = Math.max(0, Math.round(Number(amount) || 0));
   const updated: AccountBalances = {
@@ -1564,7 +1864,6 @@ export async function processExpenseBalanceRefundAsync(
     [validKey]: (current[validKey] || 0) + numAmount,
   };
 
-  await saveStoredAccountBalancesAsync(updated, true);
+  await saveStoredAccountBalancesAsync(updated, true, undefined, resolvedBranchId);
   return updated;
 }
-

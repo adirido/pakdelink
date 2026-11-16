@@ -34,8 +34,11 @@ import {
   Users,
   Calendar,
   User,
+  Building2,
+  AlertCircle,
 } from 'lucide-react';
 import { DigitalTransaction } from '../types/index.ts';
+import { normalizeBranchId } from '../services/branchService.ts';
 import {
   getStoredDigitalTransactions,
   saveStoredDigitalTransactions,
@@ -52,15 +55,18 @@ import {
 } from '../utils/scrollLock.ts';
 import {
   FundSourceKey,
+  InternalFundKey,
   HutangReceiverAccountKey,
   AccountBalances,
   FUND_SOURCES_CONFIG,
+  getDefaultBalancesForBranch,
   getStoredAccountBalances,
   saveStoredAccountBalances,
   updateAccountBalanceAsync,
   adjustBrimo1BalanceAsync,
   adjustCashBalanceAsync,
   transferBetweenAccountBalancesAsync,
+  executeInterBranchTransferAsync,
   calculateCashToDana2Total,
   calculateAllBalancesTotal,
   processTransactionBalanceDeductionAsync,
@@ -192,7 +198,7 @@ export const getAvailableProviders = (type: string): ProviderOption[] => {
 };
 
 export const DigitalFinanceModule: React.FC<DigitalFinanceModuleProps> = ({ onPrintReceipt }) => {
-  const { currentRole, operatorName, activeStaff } = useAuth();
+  const { currentRole, operatorName, activeStaff, activeBranchId, activeBranch, branches } = useAuth();
   const isOwner = currentRole === 'owner';
   const isCashier = currentRole === 'cashier';
   const canEditMainCards = isOwner;
@@ -201,13 +207,13 @@ export const DigitalFinanceModule: React.FC<DigitalFinanceModuleProps> = ({ onPr
 
   // Transaksi State
   const [transactions, setTransactions] = useState<DigitalTransaction[]>(() => {
-    return getStoredDigitalTransactions() || [];
+    return getStoredDigitalTransactions(activeBranchId) || [];
   });
   const [loading, setLoading] = useState(false);
 
   // Saldo Akun State (Cash, Brimo 1, Brimo 2, Dana 1, Dana 2, Seabank)
   const [balances, setBalances] = useState<AccountBalances>(() => {
-    return getStoredAccountBalances();
+    return getStoredAccountBalances(activeBranchId);
   });
 
   // Modal Update Saldo State
@@ -282,7 +288,7 @@ export const DigitalFinanceModule: React.FC<DigitalFinanceModuleProps> = ({ onPr
   const [tagihanCustomNote, setTagihanCustomNote] = useState<string>('');
   const [tagihanNoteInput, setTagihanNoteInput] = useState<string>('');
   const [tagihanAddAmount, setTagihanAddAmount] = useState<number>(0);
-  const [tagihanNote, setTagihanNote] = useState<string>(() => getStoredTagihanNote());
+  const [tagihanNote, setTagihanNote] = useState<string>(() => getStoredTagihanNote(activeBranchId));
   const [tagihanTransferSourceCard, setTagihanTransferSourceCard] = useState<FundSourceKey>('cash');
   const [tagihanBankCost, setTagihanBankCost] = useState<number>(0);
   const [tagihanAdminFee, setTagihanAdminFee] = useState<number>(0);
@@ -293,7 +299,7 @@ export const DigitalFinanceModule: React.FC<DigitalFinanceModuleProps> = ({ onPr
   // State Reset Harian (00:00) & Pengambilan Margin Fee (Khusus Owner)
   const [todayDateKey, setTodayDateKey] = useState<string>(() => getLocalDateKey());
   const [marginFeeLedger, setMarginFeeLedger] = useState<MarginFeeLedgerState>(() =>
-    getStoredMarginFeeLedger()
+    getStoredMarginFeeLedger(activeBranchId)
   );
   const [takeFeeModalOpen, setTakeFeeModalOpen] = useState(false);
   const [takeIncludeToday, setTakeIncludeToday] = useState(true);
@@ -302,7 +308,7 @@ export const DigitalFinanceModule: React.FC<DigitalFinanceModuleProps> = ({ onPr
 
   // State Card Titipan & Daftar Penitip
   const [titipanAccounts, setTitipanAccounts] = useState<TitipanAccount[]>(() =>
-    getStoredTitipanAccounts()
+    getStoredTitipanAccounts(activeBranchId)
   );
   const [titipanModalOpen, setTitipanModalOpen] = useState(false);
   const [addPenitipModalOpen, setAddPenitipModalOpen] = useState(false);
@@ -320,6 +326,22 @@ export const DigitalFinanceModule: React.FC<DigitalFinanceModuleProps> = ({ onPr
   const [deletePenitipTarget, setDeletePenitipTarget] = useState<TitipanAccount | null>(null);
   const [savingTitipan, setSavingTitipan] = useState(false);
 
+  // State Mutasi / Drop Modal Antar Cabang (Khusus Owner)
+  const [branchTransferModalOpen, setBranchTransferModalOpen] = useState(false);
+  const [btFromBranchId, setBtFromBranchId] = useState<string>(activeBranchId);
+  const [btToBranchId, setBtToBranchId] = useState<string>('');
+  const [btFromSourceKey, setBtFromSourceKey] = useState<InternalFundKey>('brimo1');
+  const [btToSourceKey, setBtToSourceKey] = useState<InternalFundKey>('brimo1');
+  const [btNominal, setBtNominal] = useState<number>(0);
+  const [btAdminBankCost, setBtAdminBankCost] = useState<number>(0);
+  const [btNotes, setBtNotes] = useState<string>('');
+  const [btFromBalances, setBtFromBalances] = useState<AccountBalances | null>(null);
+  const [btToBalances, setBtToBalances] = useState<AccountBalances | null>(null);
+  const [btLoadingBalances, setBtLoadingBalances] = useState(false);
+  const [btSubmitting, setBtSubmitting] = useState(false);
+  const [btError, setBtError] = useState<string>('');
+  const [branchTransferToast, setBranchTransferToast] = useState<string | null>(null);
+
   const hasTitipanChildModalOpen =
     addPenitipModalOpen ||
     Boolean(topupPenitipTarget) ||
@@ -332,6 +354,9 @@ export const DigitalFinanceModule: React.FC<DigitalFinanceModuleProps> = ({ onPr
       setUpdateModalOpen(false);
       setSelectedAccountForUpdate(null);
     }
+    if (!isOwner && branchTransferModalOpen) {
+      setBranchTransferModalOpen(false);
+    }
     if (!canManageAdminFee && takeFeeModalOpen) {
       setTakeFeeModalOpen(false);
     }
@@ -343,10 +368,12 @@ export const DigitalFinanceModule: React.FC<DigitalFinanceModuleProps> = ({ onPr
       setDeletePenitipTarget(null);
     }
   }, [
+    isOwner,
     canEditMainCards,
     canManageAdminFee,
     canEditTitipan,
     updateModalOpen,
+    branchTransferModalOpen,
     takeFeeModalOpen,
     titipanModalOpen,
     hasTitipanChildModalOpen,
@@ -359,6 +386,7 @@ export const DigitalFinanceModule: React.FC<DigitalFinanceModuleProps> = ({ onPr
       Boolean(hutangDetailTarget) ||
       Boolean(hutangConfirmTarget) ||
       (canEditMainCards && updateModalOpen) ||
+      (isOwner && branchTransferModalOpen) ||
       tagihanListModalOpen ||
       tagihanModalOpen ||
       Boolean(tagihanDetailTarget) ||
@@ -424,6 +452,20 @@ export const DigitalFinanceModule: React.FC<DigitalFinanceModuleProps> = ({ onPr
     const t = (type || '').toLowerCase();
     const n = (notes || '').toLowerCase();
     const p = (provider || '').toLowerCase();
+
+    if (t === 'transfer_cabang_keluar') {
+      return {
+        label: 'Mutasi Cabang Keluar',
+        badgeClass: 'bg-rose-50 text-rose-700 border-rose-200',
+      };
+    }
+
+    if (t === 'transfer_cabang_masuk') {
+      return {
+        label: 'Mutasi Cabang Masuk',
+        badgeClass: 'bg-emerald-50 text-emerald-700 border-emerald-200',
+      };
+    }
 
     if (t.startsWith('titipan') || n.includes('[titipan]')) {
       return {
@@ -504,12 +546,12 @@ export const DigitalFinanceModule: React.FC<DigitalFinanceModuleProps> = ({ onPr
     }
   };
 
-  const loadTransactions = async () => {
-    const localStored = getStoredDigitalTransactions() || [];
+  const loadTransactions = async (targetBranchId: string = activeBranchId) => {
+    const localStored = getStoredDigitalTransactions(targetBranchId) || [];
     try {
-      const cloudTxs = await fetchDigitalTransactionsFromCloud();
+      const cloudTxs = await fetchDigitalTransactionsFromCloud(targetBranchId);
       setTransactions(cloudTxs);
-      saveStoredDigitalTransactions(cloudTxs, true);
+      saveStoredDigitalTransactions(cloudTxs, true, targetBranchId);
       return;
     } catch (cloudErr) {
       console.warn('Gagal mengambil transaksi digital dari Cloud Firestore, fallback lokal:', cloudErr);
@@ -522,13 +564,15 @@ export const DigitalFinanceModule: React.FC<DigitalFinanceModuleProps> = ({ onPr
         if (contentType.includes('application/json')) {
           const data = await res.json();
           if (Array.isArray(data) && data.length > 0) {
-            const normalizedServer = data.map((item: DigitalTransaction) =>
-              normalizeDigitalTransaction(item)
-            );
-            const merged = mergeDigitalTransactions(localStored, normalizedServer);
-            setTransactions(merged);
-            saveStoredDigitalTransactions(merged, true);
-            return;
+            const normalizedServer = data
+              .map((item: DigitalTransaction) => normalizeDigitalTransaction(item))
+              .filter((item: DigitalTransaction) => normalizeBranchId(item.branchId) === targetBranchId);
+            if (normalizedServer.length > 0) {
+              const merged = mergeDigitalTransactions(localStored, normalizedServer);
+              setTransactions(merged);
+              saveStoredDigitalTransactions(merged, true, targetBranchId);
+              return;
+            }
           }
         }
       }
@@ -546,104 +590,126 @@ export const DigitalFinanceModule: React.FC<DigitalFinanceModuleProps> = ({ onPr
   };
 
   useEffect(() => {
-    loadTransactions();
+    const targetBranchId = activeBranchId;
+    setTransactions(mergeDigitalTransactions(getStoredDigitalTransactions(targetBranchId) || []));
+    setBalances(getStoredAccountBalances(targetBranchId));
+    setTagihanNote(getStoredTagihanNote(targetBranchId));
+    setMarginFeeLedger(getStoredMarginFeeLedger(targetBranchId));
+    setTitipanAccounts(getStoredTitipanAccounts(targetBranchId));
+    setUpdateModalOpen(false);
+    setTagihanModalOpen(false);
+    setTagihanListModalOpen(false);
+    setHutangModalOpen(false);
+    setTakeFeeModalOpen(false);
+    setTitipanModalOpen(false);
+
+    loadTransactions(targetBranchId);
 
     let isInitialCloudSnapshot = true;
     let sawCloudDocs = false;
-    const unsubCloudTx = subscribeDigitalTransactionsCloud((cloudTxs, hasDocs, meta) => {
-      if (hasDocs) {
-        isInitialCloudSnapshot = false;
-        sawCloudDocs = true;
-        setTransactions(cloudTxs);
-        saveStoredDigitalTransactions(cloudTxs, true);
-      } else if (!meta?.fromCache) {
-        if (isInitialCloudSnapshot && !sawCloudDocs) {
+    const unsubCloudTx = subscribeDigitalTransactionsCloud(
+      (cloudTxs, hasDocs, meta) => {
+        if (hasDocs) {
           isInitialCloudSnapshot = false;
-          setTransactions([]);
-          saveStoredDigitalTransactions([], true);
-        } else if (sawCloudDocs) {
-          setTransactions([]);
-          saveStoredDigitalTransactions([], true);
+          sawCloudDocs = true;
+          setTransactions(cloudTxs);
+          saveStoredDigitalTransactions(cloudTxs, true, targetBranchId);
+        } else if (!meta?.fromCache) {
+          if (isInitialCloudSnapshot && !sawCloudDocs) {
+            isInitialCloudSnapshot = false;
+            setTransactions([]);
+            saveStoredDigitalTransactions([], true, targetBranchId);
+          } else if (sawCloudDocs) {
+            setTransactions([]);
+            saveStoredDigitalTransactions([], true, targetBranchId);
+          }
         }
-      }
-    });
+      },
+      targetBranchId
+    );
 
     let hasInitializedCloudBalances = false;
-    const unsubCloudBalances = subscribeAccountBalancesCloud(async (cloudBalances, cloudNote, exists, meta) => {
-      if (exists && cloudBalances) {
-        hasInitializedCloudBalances = true;
-        setBalances(cloudBalances);
-        saveStoredAccountBalances(cloudBalances, false);
-        if (cloudNote !== undefined) {
-          setTagihanNote(cloudNote);
-          saveStoredTagihanNote(cloudNote, false);
-        }
-      } else if (!hasInitializedCloudBalances && !meta?.fromCache) {
-        hasInitializedCloudBalances = true;
-        try {
-          const verified = await fetchAccountBalancesFromCloud();
-          if (verified.exists && verified.balances) {
-            setBalances(verified.balances);
-            saveStoredAccountBalances(verified.balances, false);
-            if (verified.tagihanNote !== undefined) {
-              setTagihanNote(verified.tagihanNote);
-              saveStoredTagihanNote(verified.tagihanNote, false);
-            }
-            return;
+    const unsubCloudBalances = subscribeAccountBalancesCloud(
+      async (cloudBalances, cloudNote, exists, meta) => {
+        if (exists && cloudBalances) {
+          hasInitializedCloudBalances = true;
+          setBalances(cloudBalances);
+          saveStoredAccountBalances(cloudBalances, false, targetBranchId);
+          if (cloudNote !== undefined) {
+            setTagihanNote(cloudNote);
+            saveStoredTagihanNote(cloudNote, false, targetBranchId);
           }
-          const localBal = getStoredAccountBalances();
-          const localNote = getStoredTagihanNote();
-          await saveAccountBalancesToCloud(localBal, localNote);
-        } catch (err) {
-          console.warn('Gagal inisialisasi saldo akun di Cloud Firestore:', err);
+        } else if (!hasInitializedCloudBalances && !meta?.fromCache) {
+          hasInitializedCloudBalances = true;
+          try {
+            const verified = await fetchAccountBalancesFromCloud(targetBranchId);
+            if (verified.exists && verified.balances) {
+              setBalances(verified.balances);
+              saveStoredAccountBalances(verified.balances, false, targetBranchId);
+              if (verified.tagihanNote !== undefined) {
+                setTagihanNote(verified.tagihanNote);
+                saveStoredTagihanNote(verified.tagihanNote, false, targetBranchId);
+              }
+              return;
+            }
+            const localBal = getStoredAccountBalances(targetBranchId);
+            const localNote = getStoredTagihanNote(targetBranchId);
+            await saveAccountBalancesToCloud(localBal, localNote, targetBranchId);
+          } catch (err) {
+            console.warn('Gagal inisialisasi saldo akun di Cloud Firestore:', err);
+          }
         }
-      }
-    });
+      },
+      targetBranchId
+    );
 
     let hasInitializedCloudLedger = false;
-    const unsubCloudLedger = subscribeMarginFeeLedgerCloud(async (cloudLedger, exists, meta) => {
-      if (exists && cloudLedger) {
-        hasInitializedCloudLedger = true;
-        const nextLedger: MarginFeeLedgerState = {
-          baselineDateKey: cloudLedger.baselineDateKey || getLocalDateKey(),
-          takenByDate: cloudLedger.takenByDate || {},
-          history: cloudLedger.history || [],
-        };
-        setMarginFeeLedger(nextLedger);
-        saveStoredMarginFeeLedger(nextLedger, false);
-      } else if (!hasInitializedCloudLedger && !meta?.fromCache) {
-        hasInitializedCloudLedger = true;
-        try {
-          const verified = await fetchMarginFeeLedgerFromCloud();
-          if (verified.exists && verified.ledger) {
-            const nextLedger: MarginFeeLedgerState = {
-              baselineDateKey: verified.ledger.baselineDateKey || getLocalDateKey(),
-              takenByDate: verified.ledger.takenByDate || {},
-              history: verified.ledger.history || [],
-            };
-            setMarginFeeLedger(nextLedger);
-            saveStoredMarginFeeLedger(nextLedger, false);
-            return;
-          }
-          const cleanLedger: MarginFeeLedgerState = {
-            baselineDateKey: getLocalDateKey(),
-            takenByDate: {},
-            history: [],
+    const unsubCloudLedger = subscribeMarginFeeLedgerCloud(
+      async (cloudLedger, exists, meta) => {
+        if (exists && cloudLedger) {
+          hasInitializedCloudLedger = true;
+          const nextLedger: MarginFeeLedgerState = {
+            baselineDateKey: cloudLedger.baselineDateKey || getLocalDateKey(),
+            takenByDate: cloudLedger.takenByDate || {},
+            history: cloudLedger.history || [],
           };
-          setMarginFeeLedger(cleanLedger);
-          saveStoredMarginFeeLedger(cleanLedger, true);
-        } catch (err) {
-          console.warn('Gagal inisialisasi ledger Margin Fee di Cloud Firestore:', err);
+          setMarginFeeLedger(nextLedger);
+          saveStoredMarginFeeLedger(nextLedger, false, targetBranchId);
+        } else if (!hasInitializedCloudLedger && !meta?.fromCache) {
+          hasInitializedCloudLedger = true;
+          try {
+            const verified = await fetchMarginFeeLedgerFromCloud(targetBranchId);
+            if (verified.exists && verified.ledger) {
+              const nextLedger: MarginFeeLedgerState = {
+                baselineDateKey: verified.ledger.baselineDateKey || getLocalDateKey(),
+                takenByDate: verified.ledger.takenByDate || {},
+                history: verified.ledger.history || [],
+              };
+              setMarginFeeLedger(nextLedger);
+              saveStoredMarginFeeLedger(nextLedger, false, targetBranchId);
+              return;
+            }
+            const cleanLedger: MarginFeeLedgerState = {
+              baselineDateKey: getLocalDateKey(),
+              takenByDate: {},
+              history: [],
+            };
+            setMarginFeeLedger(cleanLedger);
+            saveStoredMarginFeeLedger(cleanLedger, true, targetBranchId);
+          } catch (err) {
+            console.warn('Gagal inisialisasi ledger Margin Fee di Cloud Firestore:', err);
+          }
         }
-      }
-    });
+      },
+      targetBranchId
+    );
 
     // Reaktif: Dengarkan event update saldo & catatan pengambilan Margin Fee antar komponen
-    const unsubBalances = onAccountBalancesUpdated((newBalances) => {
-      setBalances(newBalances);
+    const unsubBalances = onAccountBalancesUpdated(() => {
+      setBalances(getStoredAccountBalances(targetBranchId));
     });
-    const unsubMarginLedger = onMarginFeeLedgerUpdated((updatedLedger) => {
-      setMarginFeeLedger(updatedLedger);
+    const unsubMarginLedger = onMarginFeeLedgerUpdated(() => {
+      setMarginFeeLedger(getStoredMarginFeeLedger(targetBranchId));
     });
 
     // Reaktif: Dengarkan event penghapusan transaksi
@@ -655,7 +721,7 @@ export const DigitalFinanceModule: React.FC<DigitalFinanceModuleProps> = ({ onPr
             if (payload.invoiceNumber && tx.referenceNumber === payload.invoiceNumber) return false;
             return true;
           });
-          saveStoredDigitalTransactions(updated, true);
+          saveStoredDigitalTransactions(updated, true, targetBranchId);
           return updated;
         });
       }
@@ -663,7 +729,7 @@ export const DigitalFinanceModule: React.FC<DigitalFinanceModuleProps> = ({ onPr
 
     const unsubscribeUpdate = onDataUpdated((payload) => {
       if (payload.category === 'digital' || payload.category === 'all') {
-        const latestLocal = getStoredDigitalTransactions() || [];
+        const latestLocal = getStoredDigitalTransactions(targetBranchId) || [];
         if (latestLocal.length > 0) {
           setTransactions((prev) => mergeDigitalTransactions(prev, latestLocal));
         }
@@ -672,23 +738,26 @@ export const DigitalFinanceModule: React.FC<DigitalFinanceModuleProps> = ({ onPr
 
     let isInitialTitipanSnapshot = true;
     let sawCloudTitipanDocs = false;
-    const unsubCloudTitipan = subscribeTitipanAccountsCloud((cloudTitipan, hasDocs, meta) => {
-      if (hasDocs) {
-        isInitialTitipanSnapshot = false;
-        sawCloudTitipanDocs = true;
-        setTitipanAccounts(cloudTitipan);
-        saveStoredTitipanAccounts(cloudTitipan);
-      } else if (!meta?.fromCache) {
-        if (isInitialTitipanSnapshot && !sawCloudTitipanDocs) {
+    const unsubCloudTitipan = subscribeTitipanAccountsCloud(
+      (cloudTitipan, hasDocs, meta) => {
+        if (hasDocs) {
           isInitialTitipanSnapshot = false;
-          setTitipanAccounts([]);
-          saveStoredTitipanAccounts([]);
-        } else if (sawCloudTitipanDocs) {
-          setTitipanAccounts([]);
-          saveStoredTitipanAccounts([]);
+          sawCloudTitipanDocs = true;
+          setTitipanAccounts(cloudTitipan);
+          saveStoredTitipanAccounts(cloudTitipan, targetBranchId);
+        } else if (!meta?.fromCache) {
+          if (isInitialTitipanSnapshot && !sawCloudTitipanDocs) {
+            isInitialTitipanSnapshot = false;
+            setTitipanAccounts([]);
+            saveStoredTitipanAccounts([], targetBranchId);
+          } else if (sawCloudTitipanDocs) {
+            setTitipanAccounts([]);
+            saveStoredTitipanAccounts([], targetBranchId);
+          }
         }
-      }
-    });
+      },
+      targetBranchId
+    );
 
     return () => {
       unsubCloudTx();
@@ -700,7 +769,44 @@ export const DigitalFinanceModule: React.FC<DigitalFinanceModuleProps> = ({ onPr
       unsubscribeDelete();
       unsubscribeUpdate();
     };
-  }, []);
+  }, [activeBranchId]);
+
+  // Muat saldo real-time kedua cabang untuk preview pada modal Mutasi Antar Cabang (Khusus Owner)
+  useEffect(() => {
+    if (!branchTransferModalOpen || !isOwner) return;
+    let cancelled = false;
+    const loadBothBranchBalances = async () => {
+      setBtLoadingBalances(true);
+      try {
+        const [fromRes, toRes] = await Promise.all([
+          btFromBranchId ? fetchAccountBalancesFromCloud(btFromBranchId) : Promise.resolve(null),
+          btToBranchId ? fetchAccountBalancesFromCloud(btToBranchId) : Promise.resolve(null),
+        ]);
+        if (cancelled) return;
+        setBtFromBalances(
+          fromRes?.exists && fromRes.balances
+            ? fromRes.balances
+            : getStoredAccountBalances(btFromBranchId)
+        );
+        setBtToBalances(
+          toRes?.exists && toRes.balances
+            ? toRes.balances
+            : getDefaultBalancesForBranch(btToBranchId || activeBranchId)
+        );
+      } catch {
+        if (!cancelled) {
+          setBtFromBalances(getStoredAccountBalances(btFromBranchId));
+          setBtToBalances(getStoredAccountBalances(btToBranchId || activeBranchId));
+        }
+      } finally {
+        if (!cancelled) setBtLoadingBalances(false);
+      }
+    };
+    loadBothBranchBalances();
+    return () => {
+      cancelled = true;
+    };
+  }, [branchTransferModalOpen, isOwner, btFromBranchId, btToBranchId, activeBranchId]);
 
   // Reset otomatis tepat pukul 00:00 (tengah malam waktu lokal) tanpa perlu refresh halaman
   useEffect(() => {
@@ -868,6 +974,100 @@ export const DigitalFinanceModule: React.FC<DigitalFinanceModuleProps> = ({ onPr
     }, 50);
   };
 
+  const handleOpenBranchTransferModal = () => {
+    if (!isOwner) return;
+    const activeList = branches.filter((b) => b.isActive !== false);
+    const defaultFrom = activeBranchId;
+    const defaultTo =
+      activeList.find((b) => b.id !== defaultFrom)?.id ||
+      branches.find((b) => b.id !== defaultFrom)?.id ||
+      defaultFrom;
+    setBtFromBranchId(defaultFrom);
+    setBtToBranchId(defaultTo);
+    setBtFromSourceKey('brimo1');
+    setBtToSourceKey('brimo1');
+    setBtNominal(0);
+    setBtAdminBankCost(0);
+    setBtNotes('');
+    setBtError('');
+    setBranchTransferModalOpen(true);
+  };
+
+  const handleConfirmBranchTransfer = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!isOwner || btSubmitting) return;
+    setBtError('');
+
+    const activeList = branches;
+    const fromBranchObj = activeList.find((b) => b.id === btFromBranchId);
+    const toBranchObj = activeList.find((b) => b.id === btToBranchId);
+
+    if (!fromBranchObj || !toBranchObj) {
+      setBtError('Pilih cabang pengirim dan cabang penerima yang valid.');
+      return;
+    }
+    if (btFromBranchId === btToBranchId) {
+      setBtError('Cabang pengirim dan cabang penerima harus berbeda. Gunakan Transfer Antar Card untuk pindah saldo dalam satu cabang.');
+      return;
+    }
+    if (btNominal <= 0) {
+      setBtError('Nominal mutasi / drop modal harus lebih dari Rp 0.');
+      return;
+    }
+
+    setBtSubmitting(true);
+    try {
+      const res = await executeInterBranchTransferAsync({
+        fromBranchId: btFromBranchId,
+        fromBranchName: fromBranchObj.name,
+        fromSourceKey: btFromSourceKey,
+        toBranchId: btToBranchId,
+        toBranchName: toBranchObj.name,
+        toSourceKey: btToSourceKey,
+        nominal: btNominal,
+        adminBankCost: btAdminBankCost,
+        notes: btNotes,
+        operatorName: activeStaff?.name || operatorName || 'Owner',
+        cashierUid: activeStaff?.uid,
+      });
+
+      if (!res.success) {
+        setBtError(res.message || 'Gagal memproses mutasi antar cabang.');
+        return;
+      }
+
+      // Sinkronkan cache lokal cabang terkait dan state bila cabang aktif terlibat
+      if (res.outTx) {
+        const existingOut = getStoredDigitalTransactions(btFromBranchId) || [];
+        const updatedOut = mergeDigitalTransactions([res.outTx], existingOut);
+        saveStoredDigitalTransactions(updatedOut, true, btFromBranchId);
+        if (btFromBranchId === activeBranchId) {
+          setTransactions(updatedOut);
+        }
+      }
+      if (res.inTx) {
+        const existingIn = getStoredDigitalTransactions(btToBranchId) || [];
+        const updatedIn = mergeDigitalTransactions([res.inTx], existingIn);
+        saveStoredDigitalTransactions(updatedIn, true, btToBranchId);
+        if (btToBranchId === activeBranchId) {
+          setTransactions(updatedIn);
+        }
+      }
+      setBalances(getStoredAccountBalances(activeBranchId));
+      notifyDataUpdated('digital');
+
+      setBranchTransferModalOpen(false);
+      setBranchTransferToast(
+        `Mutasi ${formatRupiah(btNominal)} dari ${fromBranchObj.name} (${getFundSourceLabel(btFromSourceKey)}) ke ${toBranchObj.name} (${getFundSourceLabel(btToSourceKey)}) berhasil!`
+      );
+      setTimeout(() => setBranchTransferToast(null), 4500);
+    } catch (err: any) {
+      setBtError(err?.message || 'Gagal mengeksekusi mutasi antar cabang.');
+    } finally {
+      setBtSubmitting(false);
+    }
+  };
+
   const handleSaveUpdatedBalance = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!isOwner || !selectedAccountForUpdate) return;
@@ -875,7 +1075,11 @@ export const DigitalFinanceModule: React.FC<DigitalFinanceModuleProps> = ({ onPr
 
     try {
       const validAmount = Math.max(0, Math.round(Number(newBalanceInput) || 0));
-      const updated = await updateAccountBalanceAsync(selectedAccountForUpdate, validAmount);
+      const updated = await updateAccountBalanceAsync(
+        selectedAccountForUpdate,
+        validAmount,
+        activeBranchId
+      );
       setBalances(updated);
       setUpdateModalOpen(false);
     } catch (err: any) {
@@ -959,17 +1163,22 @@ export const DigitalFinanceModule: React.FC<DigitalFinanceModuleProps> = ({ onPr
         operatorName: activeStaff?.name || operatorName || 'Owner',
         referenceNumber: refNumber,
         status: 'success',
+        branchId: activeBranchId,
         notes: noteDetail,
         createdAt: nowIso,
       });
 
       await saveDigitalTransactionToCloud(tx);
-      const updated = await updateAccountBalanceAsync(selectedAccountForUpdate, nextTotalSaldo);
+      const updated = await updateAccountBalanceAsync(
+        selectedAccountForUpdate,
+        nextTotalSaldo,
+        activeBranchId
+      );
       setBalances(updated);
 
       setTransactions((prev) => {
         const updatedList = mergeDigitalTransactions([tx], prev);
-        saveStoredDigitalTransactions(updatedList, true);
+        saveStoredDigitalTransactions(updatedList, true, activeBranchId);
         return updatedList;
       });
       notifyDataUpdated('digital');
@@ -1060,6 +1269,7 @@ export const DigitalFinanceModule: React.FC<DigitalFinanceModuleProps> = ({ onPr
         status: 'tagihan',
         fundSource: sourceLabel,
         operatorName: currentOperator,
+        branchId: activeBranchId,
         notes: noteDetail,
         referenceNumber: refNumber,
         createdAt: new Date().toISOString(),
@@ -1075,6 +1285,7 @@ export const DigitalFinanceModule: React.FC<DigitalFinanceModuleProps> = ({ onPr
         adminBankCost: tagihanBankCost,
         adminTransferFee: tagihanAdminFee,
         tagihanNote: cleanNote,
+        branchId: activeBranchId,
       });
 
       if (!result.success) {
@@ -1092,7 +1303,7 @@ export const DigitalFinanceModule: React.FC<DigitalFinanceModuleProps> = ({ onPr
 
       setTransactions((prev) => {
         const updated = mergeDigitalTransactions([savedTx], prev);
-        saveStoredDigitalTransactions(updated, true);
+        saveStoredDigitalTransactions(updated, true, activeBranchId);
         return updated;
       });
       notifyDataUpdated('digital');
@@ -1151,6 +1362,7 @@ export const DigitalFinanceModule: React.FC<DigitalFinanceModuleProps> = ({ onPr
         status: 'success',
         fundSource: sourceLabel,
         operatorName: activeStaff?.name || operatorName || 'Owner',
+        branchId: activeBranchId,
         notes: noteDetail,
         referenceNumber: refNumber,
         createdAt: new Date().toISOString(),
@@ -1165,6 +1377,7 @@ export const DigitalFinanceModule: React.FC<DigitalFinanceModuleProps> = ({ onPr
         transferAmount,
         adminBankCost: transferBankCost,
         adminTransferFee: transferAdminFee,
+        branchId: activeBranchId,
       });
 
       if (!result.success) {
@@ -1181,7 +1394,7 @@ export const DigitalFinanceModule: React.FC<DigitalFinanceModuleProps> = ({ onPr
 
       setTransactions((prev) => {
         const updated = mergeDigitalTransactions([savedTx], prev);
-        saveStoredDigitalTransactions(updated, true);
+        saveStoredDigitalTransactions(updated, true, activeBranchId);
         return updated;
       });
       notifyDataUpdated('digital');
@@ -1279,6 +1492,7 @@ export const DigitalFinanceModule: React.FC<DigitalFinanceModuleProps> = ({ onPr
         profit: (adminStoreFee || 0) - (adminBankCost || 0),
         paymentMethod: selectedPaymentMethod,
         fundSource: fundLabel,
+        branchId: activeBranchId,
         notes: combinedNotes,
         referenceNumber: `${finalProvider.toUpperCase().slice(0, 3)}-${Date.now().toString().slice(-6)}-${uniqueSuffix}`,
         createdAt: new Date().toISOString(),
@@ -1299,6 +1513,7 @@ export const DigitalFinanceModule: React.FC<DigitalFinanceModuleProps> = ({ onPr
         adminStoreFee: adminStoreFee || 0,
         totalCustomerPaid,
         paymentMethod: selectedPaymentMethod,
+        branchId: activeBranchId,
       });
       setBalances(updatedBalances);
 
@@ -1312,7 +1527,7 @@ export const DigitalFinanceModule: React.FC<DigitalFinanceModuleProps> = ({ onPr
       // Update state & localStorage secara reaktif tanpa memicu fetch loop
       setTransactions((prev) => {
         const updated = mergeDigitalTransactions([savedTx], prev);
-        saveStoredDigitalTransactions(updated, true);
+        saveStoredDigitalTransactions(updated, true, activeBranchId);
         return updated;
       });
       notifyDataUpdated('digital');
@@ -1352,13 +1567,16 @@ export const DigitalFinanceModule: React.FC<DigitalFinanceModuleProps> = ({ onPr
     [transactions, todayDateKey]
   );
 
-  // Kalkulasi Card Perputaran Hari Ini (Reset jam 00:00)
+  // Kalkulasi Card Perputaran Hari Ini (Reset jam 00:00, tidak termasuk mutasi drop modal antar cabang)
   const totalDigitalVolume = useMemo(
     () =>
-      todayTransactions.reduce(
-        (acc, cur) => acc + (Number(cur.totalCustomerPaid) || Number(cur.nominal) || 0),
-        0
-      ),
+      todayTransactions.reduce((acc, cur) => {
+        const rawType = (cur.type || '').toLowerCase();
+        if (rawType === 'transfer_cabang_keluar' || rawType === 'transfer_cabang_masuk') {
+          return acc;
+        }
+        return acc + (Number(cur.totalCustomerPaid) || Number(cur.nominal) || 0);
+      }, 0),
     [todayTransactions]
   );
 
@@ -1394,6 +1612,7 @@ export const DigitalFinanceModule: React.FC<DigitalFinanceModuleProps> = ({ onPr
         includeToday: takeIncludeToday,
         includePrevious: takeIncludePrevious,
         takenBy: activeStaff?.name || operatorName || (isOwner ? 'Owner' : 'Kasir'),
+        branchId: activeBranchId,
       });
 
       if (!result.success) {
@@ -1458,10 +1677,12 @@ export const DigitalFinanceModule: React.FC<DigitalFinanceModuleProps> = ({ onPr
         .filter(Boolean)
         .join(' ');
 
+      const txBranchId = normalizeBranchId(tx.branchId || activeBranchId);
       const updatedTx: DigitalTransaction = normalizeDigitalTransaction({
         ...tx,
         paymentMethod: settledPaymentMethod,
         status: 'success',
+        branchId: txBranchId,
         notes: settledNotes,
         paidAt: settledAt,
       });
@@ -1470,7 +1691,7 @@ export const DigitalFinanceModule: React.FC<DigitalFinanceModuleProps> = ({ onPr
       await saveDigitalTransactionToCloud(updatedTx);
 
       // 2. Kurangi Card Hutang dan masukkan dana pembayaran ke rekening penerima pilihan & simpan ke Cloud Firestore
-      const updatedBalances = await settleHutangTransactionBalanceAsync(tx, receiverKey);
+      const updatedBalances = await settleHutangTransactionBalanceAsync(tx, receiverKey, txBranchId);
       setBalances(updatedBalances);
 
       // 3. Perbarui state lokal & localStorage
@@ -1483,7 +1704,7 @@ export const DigitalFinanceModule: React.FC<DigitalFinanceModuleProps> = ({ onPr
           const sameId = item.id === tx.id;
           return sameRef || sameId ? updatedTx : item;
         });
-        saveStoredDigitalTransactions(updatedList, true);
+        saveStoredDigitalTransactions(updatedList, true, activeBranchId);
         return updatedList;
       });
       notifyDataUpdated('digital');
@@ -1530,10 +1751,12 @@ export const DigitalFinanceModule: React.FC<DigitalFinanceModuleProps> = ({ onPr
 
     try {
       const settledAt = new Date().toISOString();
+      const txBranchId = normalizeBranchId(tx.branchId || activeBranchId);
       const updatedTx: DigitalTransaction = normalizeDigitalTransaction({
         ...tx,
         paymentMethod: 'cash',
         status: 'success',
+        branchId: txBranchId,
         paidAt: settledAt,
       });
 
@@ -1541,7 +1764,7 @@ export const DigitalFinanceModule: React.FC<DigitalFinanceModuleProps> = ({ onPr
       await saveDigitalTransactionToCloud(updatedTx);
 
       // 2. Kurangi Card Tagihan dan masukkan dana pelunasan ke Card Cash & simpan ke Cloud Firestore
-      const updatedBalances = await settleTagihanTransactionBalanceAsync(tx);
+      const updatedBalances = await settleTagihanTransactionBalanceAsync(tx, txBranchId);
       setBalances(updatedBalances);
       if ((updatedBalances.tagihan || 0) <= 0) {
         setTagihanNote('');
@@ -1557,7 +1780,7 @@ export const DigitalFinanceModule: React.FC<DigitalFinanceModuleProps> = ({ onPr
           const sameId = item.id === tx.id;
           return sameRef || sameId ? updatedTx : item;
         });
-        saveStoredDigitalTransactions(updatedList, true);
+        saveStoredDigitalTransactions(updatedList, true, activeBranchId);
         return updatedList;
       });
       notifyDataUpdated('digital');
@@ -1622,6 +1845,7 @@ export const DigitalFinanceModule: React.FC<DigitalFinanceModuleProps> = ({ onPr
       operatorName: activeStaff?.name || operatorName || 'Kasir',
       referenceNumber: refNumber,
       status: 'success',
+      branchId: activeBranchId,
       notes: params.notes,
       createdAt: params.createdAt,
     });
@@ -1629,7 +1853,7 @@ export const DigitalFinanceModule: React.FC<DigitalFinanceModuleProps> = ({ onPr
     await saveDigitalTransactionToCloud(tx);
     setTransactions((prev) => {
       const updated = mergeDigitalTransactions([tx], prev);
-      saveStoredDigitalTransactions(updated, true);
+      saveStoredDigitalTransactions(updated, true, activeBranchId);
       return updated;
     });
     notifyDataUpdated('digital');
@@ -1662,11 +1886,12 @@ export const DigitalFinanceModule: React.FC<DigitalFinanceModuleProps> = ({ onPr
         id: `titipan_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
         name: cleanName,
         balance: addedAmount,
+        branchId: activeBranchId,
         createdAt: nowIso,
         updatedAt: nowIso,
       };
       await saveTitipanAccountToCloud(newEntry);
-      const updatedBalances = await adjustBrimo1BalanceAsync(addedAmount);
+      const updatedBalances = await adjustBrimo1BalanceAsync(addedAmount, activeBranchId);
       await recordTitipanTransaction({
         actionType: 'titipan_masuk',
         providerLabel: 'TITIPAN BARU',
@@ -1680,7 +1905,7 @@ export const DigitalFinanceModule: React.FC<DigitalFinanceModuleProps> = ({ onPr
 
       const updated = [...titipanAccounts, newEntry];
       setTitipanAccounts(updated);
-      saveStoredTitipanAccounts(updated);
+      saveStoredTitipanAccounts(updated, activeBranchId);
       setBalances(updatedBalances);
 
       setAddPenitipModalOpen(false);
@@ -1711,10 +1936,11 @@ export const DigitalFinanceModule: React.FC<DigitalFinanceModuleProps> = ({ onPr
       const updatedAccount: TitipanAccount = {
         ...topupPenitipTarget,
         balance: nextBal,
+        branchId: normalizeBranchId(topupPenitipTarget.branchId || activeBranchId),
         updatedAt: nowIso,
       };
       await saveTitipanAccountToCloud(updatedAccount);
-      const updatedBalances = await adjustBrimo1BalanceAsync(addedAmount);
+      const updatedBalances = await adjustBrimo1BalanceAsync(addedAmount, activeBranchId);
       await recordTitipanTransaction({
         actionType: 'titipan_masuk',
         providerLabel: 'TAMBAH SALDO TITIPAN',
@@ -1730,7 +1956,7 @@ export const DigitalFinanceModule: React.FC<DigitalFinanceModuleProps> = ({ onPr
         item.id === updatedAccount.id ? updatedAccount : item
       );
       setTitipanAccounts(updatedList);
-      saveStoredTitipanAccounts(updatedList);
+      saveStoredTitipanAccounts(updatedList, activeBranchId);
       setBalances(updatedBalances);
 
       setTopupPenitipTarget(null);
@@ -1778,12 +2004,13 @@ export const DigitalFinanceModule: React.FC<DigitalFinanceModuleProps> = ({ onPr
       const updatedAccount: TitipanAccount = {
         ...tarikPenitipTarget,
         balance: nextBal,
+        branchId: normalizeBranchId(tarikPenitipTarget.branchId || activeBranchId),
         updatedAt: nowIso,
       };
       await saveTitipanAccountToCloud(updatedAccount);
       const updatedBalances = isTarikTunaiAction
-        ? await adjustCashBalanceAsync(-cleanNominal)
-        : await adjustBrimo1BalanceAsync(-totalDeducted);
+        ? await adjustCashBalanceAsync(-cleanNominal, activeBranchId)
+        : await adjustBrimo1BalanceAsync(-totalDeducted, activeBranchId);
 
       const cleanRek = tarikNoRekening.trim();
       const targetDisplay =
@@ -1820,7 +2047,7 @@ export const DigitalFinanceModule: React.FC<DigitalFinanceModuleProps> = ({ onPr
         item.id === updatedAccount.id ? updatedAccount : item
       );
       setTitipanAccounts(updatedList);
-      saveStoredTitipanAccounts(updatedList);
+      saveStoredTitipanAccounts(updatedList, activeBranchId);
       setBalances(updatedBalances);
 
       setTarikPenitipTarget(null);
@@ -1848,13 +2075,13 @@ export const DigitalFinanceModule: React.FC<DigitalFinanceModuleProps> = ({ onPr
       await deleteTitipanAccountFromCloud(targetId);
 
       if (remainingBalance > 0) {
-        const updatedBalances = await adjustBrimo1BalanceAsync(-remainingBalance);
+        const updatedBalances = await adjustBrimo1BalanceAsync(-remainingBalance, activeBranchId);
         setBalances(updatedBalances);
       }
 
       const updatedList = titipanAccounts.filter((item) => item.id !== targetId);
       setTitipanAccounts(updatedList);
-      saveStoredTitipanAccounts(updatedList);
+      saveStoredTitipanAccounts(updatedList, activeBranchId);
 
       setDeletePenitipTarget(null);
     } catch (err: any) {
@@ -1866,12 +2093,19 @@ export const DigitalFinanceModule: React.FC<DigitalFinanceModuleProps> = ({ onPr
 
   return (
     <div className="w-full max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex flex-col gap-1.5 sm:gap-2 lg:gap-1.5 lg:flex-1">
+      {branchTransferToast && (
+        <div className="fixed bottom-6 right-6 z-50 bg-white text-slate-800 px-4 py-3 rounded-2xl shadow-xl flex items-center gap-2.5 text-xs font-bold border border-emerald-200 animate-in fade-in duration-200">
+          <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+          <span>{branchTransferToast}</span>
+        </div>
+      )}
+
       {/* ======================================================== */}
       {/* 1 & 2. AREA RINGKASAN DERETAN 11 CARD SEJAJAR & TOTAL SALDO */}
       {/* ======================================================== */}
       <div className="bg-white px-3 py-2 sm:px-4 sm:py-2.5 rounded-xl border border-slate-200/90 shadow-2xs shrink-0 flex flex-col gap-1.5 sm:gap-2">
         {/* Baris Total Saldo & Status Global */}
-        <div className="flex items-center justify-between gap-2 bg-gradient-to-r from-indigo-50/90 via-sky-50/80 to-emerald-50/90 border border-indigo-100/90 px-3 py-1.5 sm:px-4 sm:py-2 lg:py-1.5 rounded-lg shadow-2xs">
+        <div className="flex flex-wrap items-center justify-between gap-2 bg-gradient-to-r from-indigo-50/90 via-sky-50/80 to-emerald-50/90 border border-indigo-100/90 px-3 py-1.5 sm:px-4 sm:py-2 lg:py-1.5 rounded-lg shadow-2xs">
           <div className="flex items-center gap-2.5 lg:gap-2 flex-wrap">
             <div className="w-6.5 h-6.5 sm:w-7 sm:h-7 lg:w-5 lg:h-5 rounded-md bg-indigo-600 text-white flex items-center justify-center shadow-xs shrink-0">
               <Wallet className="w-3.5 h-3.5 sm:w-4 sm:h-4 lg:w-3 lg:h-3" />
@@ -1883,27 +2117,47 @@ export const DigitalFinanceModule: React.FC<DigitalFinanceModuleProps> = ({ onPr
               <span className="text-xs sm:text-base lg:text-[13px] font-extrabold text-indigo-700 font-mono tracking-tight leading-tight">
                 {formatRupiah(totalCombinedBalance)}
               </span>
-              <span className="hidden lg:inline text-[9.5px] text-slate-500 font-medium leading-tight">
+              {isOwner && (
+                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-white/90 border border-indigo-200 text-indigo-700 text-[10px] font-bold leading-tight">
+                  <Building2 className="w-2.5 h-2.5" />
+                  {activeBranch.name}
+                </span>
+              )}
+              <span className="hidden xl:inline text-[9.5px] text-slate-500 font-medium leading-tight">
                 (Cash + Brimo 1 + Brimo 2 + Dana 1 + Dana 2 + Seabank + Tagihan)
               </span>
             </div>
           </div>
 
-          {canManageAdminFee && previousUnclaimedFee > 0 && (
-            <button
-              type="button"
-              onClick={handleOpenTakeFeeModal}
-              title={`Ada sisa Admin Fee hari sebelumnya sebesar ${formatRupiah(previousUnclaimedFee)} yang belum diambil`}
-              className="inline-flex items-center gap-1.5 px-2.5 py-1 lg:px-2 lg:py-0.5 rounded-lg bg-amber-100 hover:bg-amber-200/90 active:bg-amber-200 border border-amber-300 text-amber-900 text-[10.5px] sm:text-xs lg:text-[10.5px] font-bold transition cursor-pointer shadow-2xs shrink-0 leading-tight"
-            >
-              <Bell className="w-3 h-3 text-amber-700 animate-pulse shrink-0" />
-              <span className="hidden sm:inline">Fee kemarin belum diambil:</span>
-              <span className="sm:hidden">Fee kemarin:</span>
-              <span className="font-mono font-extrabold text-amber-950">
-                +{formatRupiah(previousUnclaimedFee)}
-              </span>
-            </button>
-          )}
+          <div className="flex items-center gap-1.5 flex-wrap">
+            {isOwner && (
+              <button
+                type="button"
+                onClick={handleOpenBranchTransferModal}
+                title="Drop Modal / Mutasi Saldo Antar Cabang (Khusus Owner)"
+                className="inline-flex items-center gap-1.5 px-2.5 py-1 lg:px-2.5 lg:py-0.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 active:bg-indigo-800 text-white text-[10.5px] sm:text-xs lg:text-[10.5px] font-bold transition cursor-pointer shadow-2xs shrink-0 leading-tight"
+              >
+                <ArrowRightLeft className="w-3 h-3 shrink-0" />
+                <span>Mutasi Cabang</span>
+              </button>
+            )}
+
+            {canManageAdminFee && previousUnclaimedFee > 0 && (
+              <button
+                type="button"
+                onClick={handleOpenTakeFeeModal}
+                title={`Ada sisa Admin Fee hari sebelumnya sebesar ${formatRupiah(previousUnclaimedFee)} yang belum diambil`}
+                className="inline-flex items-center gap-1.5 px-2.5 py-1 lg:px-2 lg:py-0.5 rounded-lg bg-amber-100 hover:bg-amber-200/90 active:bg-amber-200 border border-amber-300 text-amber-900 text-[10.5px] sm:text-xs lg:text-[10.5px] font-bold transition cursor-pointer shadow-2xs shrink-0 leading-tight"
+              >
+                <Bell className="w-3 h-3 text-amber-700 animate-pulse shrink-0" />
+                <span className="hidden sm:inline">Fee kemarin belum diambil:</span>
+                <span className="sm:hidden">Fee kemarin:</span>
+                <span className="font-mono font-extrabold text-amber-950">
+                  +{formatRupiah(previousUnclaimedFee)}
+                </span>
+              </button>
+            )}
+          </div>
         </div>
 
         {(() => {
@@ -7363,6 +7617,309 @@ export const DigitalFinanceModule: React.FC<DigitalFinanceModuleProps> = ({ onPr
                     )}
                   </button>
                 </div>
+              </div>
+            </div>,
+            document.body
+          );
+        })()}
+
+      {/* Modal Mutasi / Drop Modal Antar Cabang (Khusus Owner) */}
+      {isOwner &&
+        branchTransferModalOpen &&
+        (() => {
+          const fromBalMap = btFromBalances || getStoredAccountBalances(btFromBranchId);
+          const toBalMap = btToBalances || getDefaultBalancesForBranch(btToBranchId);
+          const currentFromCardBal = Number(fromBalMap[btFromSourceKey] || 0);
+          const currentToCardBal = Number(toBalMap[btToSourceKey] || 0);
+          const totalOut = Math.max(0, btNominal) + Math.max(0, btAdminBankCost);
+          const nextFromCardBal = Math.max(0, currentFromCardBal - totalOut);
+          const nextToCardBal = currentToCardBal + Math.max(0, btNominal);
+          const isInsufficientFrom = totalOut > currentFromCardBal;
+          const isSameBranch = btFromBranchId === btToBranchId;
+
+          const cardOptions: Array<{ key: InternalFundKey; label: string }> = [
+            { key: 'cash', label: 'Cash (Tunai)' },
+            { key: 'brimo1', label: 'Brimo 1' },
+            { key: 'brimo2', label: 'Brimo 2' },
+            { key: 'dana1', label: 'Dana 1' },
+            { key: 'dana2', label: 'Dana 2' },
+            { key: 'seabank', label: 'Seabank' },
+          ];
+
+          return createPortal(
+            <div
+              role="dialog"
+              aria-modal="true"
+              className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 backdrop-blur-md p-3 sm:p-4 animate-in fade-in duration-200"
+              style={{ backdropFilter: 'blur(8px)', WebkitBackdropFilter: 'blur(8px)', overscrollBehavior: 'contain' }}
+              onTouchMove={handleBackdropTouchMove}
+              onWheel={handleBackdropWheel}
+              onClick={(e) => {
+                if (e.target === e.currentTarget && !btSubmitting) {
+                  setBranchTransferModalOpen(false);
+                }
+              }}
+            >
+              <div
+                className="bg-white rounded-2xl shadow-2xl max-w-lg w-full max-h-[92vh] border border-slate-200 text-slate-900 flex flex-col overflow-hidden my-auto"
+                onTouchMove={handleModalCardScroll}
+                onWheel={handleModalCardScroll}
+              >
+                {/* Header */}
+                <div className="flex items-center justify-between p-4 sm:p-5 pb-3 border-b border-slate-100 shrink-0 bg-white">
+                  <div className="flex items-center gap-2.5">
+                    <div className="w-8 h-8 rounded-xl bg-indigo-50 border border-indigo-200 text-indigo-600 flex items-center justify-center shrink-0">
+                      <Building2 className="w-4 h-4" />
+                    </div>
+                    <div>
+                      <h3 className="font-bold text-sm text-slate-900">
+                        Mutasi / Drop Modal Antar Cabang
+                      </h3>
+                      <p className="text-[11px] text-slate-500">
+                        Kirim modal langsung antar rekening Pusat &amp; Cabang secara real-time.
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    disabled={btSubmitting}
+                    onClick={() => setBranchTransferModalOpen(false)}
+                    className="text-slate-400 hover:text-slate-600 p-1.5 rounded-lg hover:bg-slate-100 cursor-pointer"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+
+                <form onSubmit={handleConfirmBranchTransfer} className="flex flex-col flex-1 min-h-0">
+                  <div className="flex-1 overflow-y-auto p-4 sm:p-5 space-y-3.5">
+                    {branches.length < 2 && (
+                      <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-800">
+                        Belum ada cabang lain selain <strong>Pusat</strong>. Tambahkan cabang baru di menu{' '}
+                        <strong>Kelola Pengguna &amp; Cabang</strong> terlebih dahulu.
+                      </div>
+                    )}
+
+                    {/* Cabang & Card Pengirim */}
+                    <div className="p-3 rounded-xl bg-rose-50/50 border border-rose-200/80 space-y-2.5">
+                      <div className="text-[11px] font-bold text-rose-800 uppercase tracking-wide flex items-center justify-between">
+                        <span>1. Sumber Pengirim (Cabang Asal)</span>
+                        {btLoadingBalances && (
+                          <span className="text-[10px] font-normal text-slate-500">Memuat saldo...</span>
+                        )}
+                      </div>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                        <div>
+                          <label className="text-[11px] font-semibold text-slate-600 block mb-1">
+                            Cabang Pengirim
+                          </label>
+                          <select
+                            value={btFromBranchId}
+                            onChange={(e) => setBtFromBranchId(e.target.value)}
+                            className="w-full text-xs py-2 px-2.5 rounded-lg border border-slate-200 bg-white font-semibold"
+                          >
+                            {branches.map((b) => (
+                              <option key={b.id} value={b.id}>
+                                {b.name}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                        <div>
+                          <label className="text-[11px] font-semibold text-slate-600 block mb-1">
+                            Card Sumber Pengirim
+                          </label>
+                          <select
+                            value={btFromSourceKey}
+                            onChange={(e) => setBtFromSourceKey(e.target.value as InternalFundKey)}
+                            className="w-full text-xs py-2 px-2.5 rounded-lg border border-slate-200 bg-white font-semibold"
+                          >
+                            {cardOptions.map((c) => (
+                              <option key={c.key} value={c.key}>
+                                {c.label} ({formatRupiah(Number(fromBalMap[c.key] || 0))})
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                      </div>
+                      <div className="text-[11px] text-slate-600 flex items-center justify-between pt-1 border-t border-rose-200/60">
+                        <span>Saldo tersedia:</span>
+                        <span className="font-mono font-bold text-slate-900">
+                          {formatRupiah(currentFromCardBal)}
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Cabang & Card Penerima */}
+                    <div className="p-3 rounded-xl bg-emerald-50/50 border border-emerald-200/80 space-y-2.5">
+                      <div className="text-[11px] font-bold text-emerald-800 uppercase tracking-wide">
+                        2. Tujuan Penerima (Cabang Tujuan)
+                      </div>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                        <div>
+                          <label className="text-[11px] font-semibold text-slate-600 block mb-1">
+                            Cabang Penerima
+                          </label>
+                          <select
+                            value={btToBranchId}
+                            onChange={(e) => setBtToBranchId(e.target.value)}
+                            className="w-full text-xs py-2 px-2.5 rounded-lg border border-slate-200 bg-white font-semibold"
+                          >
+                            {branches.map((b) => (
+                              <option key={b.id} value={b.id}>
+                                {b.name}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                        <div>
+                          <label className="text-[11px] font-semibold text-slate-600 block mb-1">
+                            Card Tujuan Penerima
+                          </label>
+                          <select
+                            value={btToSourceKey}
+                            onChange={(e) => setBtToSourceKey(e.target.value as InternalFundKey)}
+                            className="w-full text-xs py-2 px-2.5 rounded-lg border border-slate-200 bg-white font-semibold"
+                          >
+                            {cardOptions.map((c) => (
+                              <option key={c.key} value={c.key}>
+                                {c.label} ({formatRupiah(Number(toBalMap[c.key] || 0))})
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                      </div>
+                      <div className="text-[11px] text-slate-600 flex items-center justify-between pt-1 border-t border-emerald-200/60">
+                        <span>Saldo penerima saat ini:</span>
+                        <span className="font-mono font-bold text-slate-900">
+                          {formatRupiah(currentToCardBal)}
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Nominal & Biaya Admin */}
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <div>
+                        <label className="text-xs font-semibold text-slate-700 block mb-1">
+                          Nominal Drop Modal <span className="text-rose-500">*</span>
+                        </label>
+                        <input
+                          type="text"
+                          inputMode="numeric"
+                          required
+                          value={formatCurrencyInput(btNominal)}
+                          onChange={(e) => {
+                            setBtError('');
+                            setBtNominal(parseCurrencyInput(e.target.value));
+                          }}
+                          placeholder="Rp 0"
+                          className="w-full text-xs py-2.5 px-3 rounded-xl border border-slate-200 font-mono font-bold focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 focus:outline-none"
+                        />
+                      </div>
+                      <div>
+                        <label className="text-xs font-semibold text-slate-700 block mb-1">
+                          Biaya Admin Transfer Bank
+                        </label>
+                        <input
+                          type="text"
+                          inputMode="numeric"
+                          value={formatCurrencyInput(btAdminBankCost)}
+                          onChange={(e) => {
+                            setBtError('');
+                            setBtAdminBankCost(parseCurrencyInput(e.target.value));
+                          }}
+                          placeholder="Rp 0 (jika gratis)"
+                          className="w-full text-xs py-2.5 px-3 rounded-xl border border-slate-200 font-mono font-bold focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 focus:outline-none"
+                        />
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="text-xs font-semibold text-slate-700 block mb-1">
+                        Catatan Mutasi (Opsional)
+                      </label>
+                      <input
+                        type="text"
+                        value={btNotes}
+                        onChange={(e) => setBtNotes(e.target.value)}
+                        placeholder="Misal: Drop modal operasional pagi cabang"
+                        className="w-full text-xs py-2 px-3 rounded-xl border border-slate-200 focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 focus:outline-none"
+                      />
+                    </div>
+
+                    {/* Preview Saldo Sebelum -> Sesudah */}
+                    <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 space-y-1.5 text-[11px]">
+                      <div className="font-bold text-slate-800">Simulasi Perubahan Saldo:</div>
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-slate-600">
+                          Pengirim ({getFundSourceLabel(btFromSourceKey)}):
+                        </span>
+                        <span className="font-mono font-bold text-rose-700">
+                          {formatRupiah(currentFromCardBal)} ➔ {formatRupiah(nextFromCardBal)}
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-slate-600">
+                          Penerima ({getFundSourceLabel(btToSourceKey)}):
+                        </span>
+                        <span className="font-mono font-bold text-emerald-700">
+                          {formatRupiah(currentToCardBal)} ➔ {formatRupiah(nextToCardBal)}
+                        </span>
+                      </div>
+                      {btAdminBankCost > 0 && (
+                        <div className="text-[10px] text-slate-500 pt-1 border-t border-slate-200">
+                          Biaya transfer bank {formatRupiah(btAdminBankCost)} dipotong dari saldo pengirim &amp; tercatat sebagai biaya mutasi cabang pengirim (tidak dihitung sebagai omset pelanggan).
+                        </div>
+                      )}
+                    </div>
+
+                    {(btError || isInsufficientFrom || isSameBranch) && (
+                      <div className="p-2.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-xs flex items-start gap-2">
+                        <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                        <span>
+                          {btError ||
+                            (isSameBranch
+                              ? 'Cabang pengirim dan penerima harus berbeda.'
+                              : `Saldo ${getFundSourceLabel(btFromSourceKey)} cabang pengirim tidak mencukupi (Tersedia: ${formatRupiah(currentFromCardBal)}, Dibutuhkan: ${formatRupiah(totalOut)}).`)}
+                        </span>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Footer */}
+                  <div className="shrink-0 p-4 sm:p-5 pt-3 border-t border-slate-100 bg-white flex justify-end gap-2">
+                    <button
+                      type="button"
+                      disabled={btSubmitting}
+                      onClick={() => setBranchTransferModalOpen(false)}
+                      className="px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-xl cursor-pointer"
+                    >
+                      Batal
+                    </button>
+                    <button
+                      type="submit"
+                      disabled={
+                        btSubmitting ||
+                        branches.length < 2 ||
+                        isSameBranch ||
+                        btNominal <= 0 ||
+                        isInsufficientFrom
+                      }
+                      className="px-5 py-2 text-xs font-semibold rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white flex items-center gap-1.5 shadow-sm cursor-pointer disabled:opacity-50"
+                    >
+                      {btSubmitting ? (
+                        <>
+                          <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                          <span>Memproses...</span>
+                        </>
+                      ) : (
+                        <>
+                          <ArrowRightLeft className="w-3.5 h-3.5" />
+                          <span>Kirim Drop Modal</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </form>
               </div>
             </div>,
             document.body

@@ -111,14 +111,21 @@ function classifyTransaction(tx: DigitalTransaction): {
   const provider = (tx.provider || '').toLowerCase();
   const targetAcc = (tx.targetAccount || '').toLowerCase();
 
+  const isTransferCabangKeluar = rawType === 'transfer_cabang_keluar';
+  const isTransferCabangMasuk = rawType === 'transfer_cabang_masuk';
+
   const isCardTagihan =
-    notes.includes('[tagihan]') ||
-    targetAcc === 'card tagihan' ||
-    (targetAcc.includes('tagihan') && (rawType.includes('transfer_saldo') || rawType === 'tagihan')) ||
-    rawType === 'card_tagihan' ||
-    rawType === 'tagihan';
+    !isTransferCabangKeluar &&
+    !isTransferCabangMasuk &&
+    (notes.includes('[tagihan]') ||
+      targetAcc === 'card tagihan' ||
+      (targetAcc.includes('tagihan') && (rawType.includes('transfer_saldo') || rawType === 'tagihan')) ||
+      rawType === 'card_tagihan' ||
+      rawType === 'tagihan');
 
   const isTransferCard =
+    !isTransferCabangKeluar &&
+    !isTransferCabangMasuk &&
     !isCardTagihan &&
     (rawType.includes('transfer_saldo') ||
       rawType.includes('pindah_dana') ||
@@ -129,6 +136,12 @@ function classifyTransaction(tx: DigitalTransaction): {
       provider.includes('➔') ||
       provider.includes('->'));
 
+  if (isTransferCabangKeluar) {
+    return { category: 'transfer_card', categoryLabel: 'Mutasi Cabang Keluar', isInternal: true };
+  }
+  if (isTransferCabangMasuk) {
+    return { category: 'transfer_card', categoryLabel: 'Mutasi Cabang Masuk', isInternal: true };
+  }
   if (isCardTagihan) {
     return { category: 'tagihan', categoryLabel: 'Tagihan', isInternal: true };
   }

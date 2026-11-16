@@ -3,6 +3,8 @@ import { TrendingUp, ChevronLeft, ChevronRight, RotateCcw, MoveHorizontal } from
 import { DigitalTransaction, StoreExpense, Sale, ServiceSoftwareOrder } from '../types/index.ts';
 import { getStoredSales, getStoredServiceOrders } from '../utils/transactionSync.ts';
 import { isHutangTransaction } from '../services/accountBalanceService.ts';
+import { useAuth } from '../context/AuthContext.tsx';
+import { normalizeBranchId } from '../services/branchService.ts';
 
 export type GranularityType = 'daily' | 'weekly' | 'monthly';
 
@@ -25,7 +27,7 @@ interface DataPoint {
   trxCount: number;
 }
 
-// Deteksi mutasi internal (TF Card & Card Tagihan) agar tidak ikut terhitung di jumlah transaksi pelanggan
+// Deteksi mutasi internal (TF Card, Mutasi Cabang & Card Tagihan) agar tidak ikut terhitung di jumlah transaksi pelanggan
 function isInternalTransferTx(tx: DigitalTransaction): boolean {
   const typeStr = (tx.type || '').toLowerCase();
   const notesStr = (tx.notes || '').toLowerCase();
@@ -33,8 +35,11 @@ function isInternalTransferTx(tx: DigitalTransaction): boolean {
   const customerStr = (tx.customerName || '').toLowerCase();
   const targetStr = (tx.targetAccount || '').toLowerCase();
   const fundStr = (tx.fundSource || '').toLowerCase();
+  const paymentStr = (tx.paymentMethod || '').toLowerCase();
 
   return (
+    typeStr.includes('transfer_cabang') ||
+    paymentStr === 'transfer_cabang' ||
     typeStr.includes('transfer_saldo') ||
     typeStr.includes('pindah_dana') ||
     typeStr.includes('mutasi') ||
@@ -117,6 +122,7 @@ export const FinancialTrendChart: React.FC<FinancialTrendChartProps> = ({
   selectedDate,
   formatRupiah,
 }) => {
+  const { activeBranchId } = useAuth();
   // Granularity state initialized sensibly based on active period
   const [granularity, setGranularity] = useState<GranularityType>(() => {
     if (periodType === 'yearly' || periodType === 'all') return 'monthly';
@@ -201,8 +207,20 @@ export const FinancialTrendChart: React.FC<FinancialTrendChartProps> = ({
   };
 
   // Load legacy POS Sales & Service Orders if present
-  const storedSales = useMemo(() => getStoredSales(), [allDigitalTransactions]);
-  const storedServices = useMemo(() => getStoredServiceOrders(), [allDigitalTransactions]);
+  const storedSales = useMemo(
+    () =>
+      getStoredSales().filter(
+        (s) => normalizeBranchId(s.branchId) === activeBranchId
+      ),
+    [allDigitalTransactions, activeBranchId]
+  );
+  const storedServices = useMemo(
+    () =>
+      getStoredServiceOrders().filter(
+        (s) => normalizeBranchId(s.branchId) === activeBranchId
+      ),
+    [allDigitalTransactions, activeBranchId]
+  );
 
   // Construct Time Series Buckets (Fee only)
   const { seriesData, activeRangeLabel } = useMemo(() => {

@@ -6,6 +6,7 @@ import {
   getStoredExpenses,
 } from './transactionSync.ts';
 import { isHutangTransaction } from '../services/accountBalanceService.ts';
+import { getActiveBranchId, normalizeBranchId } from '../services/branchService.ts';
 
 const INDONESIAN_MONTH_NAMES = [
   'Januari',
@@ -73,7 +74,11 @@ function matchesPeriod(dateVal: any, start: string | null, end: string | null): 
   return true;
 }
 
-export function computeClientFinancialSummary(filter: ClientAnalyticsFilter): FinancialSummary {
+export function computeClientFinancialSummary(
+  filter: ClientAnalyticsFilter,
+  branchId?: string
+): FinancialSummary {
+  const targetBranchId = normalizeBranchId(branchId || getActiveBranchId());
   const now = new Date();
   const todayStr = extractDateStr(now) || now.toISOString().slice(0, 10);
   const currentYear = now.getFullYear();
@@ -113,11 +118,19 @@ export function computeClientFinancialSummary(filter: ClientAnalyticsFilter): Fi
     periodLabel = 'Semua Periode';
   }
 
-  // 1. Ambil data transaksi dari localStorage / in-memory
-  const allSales = getStoredSales();
-  const allDigi = getStoredDigitalTransactions();
-  const allServices = getStoredServiceOrders();
-  const allExpenses = getStoredExpenses();
+  // 1. Ambil data transaksi cabang dari localStorage / in-memory
+  const allSales = getStoredSales().filter(
+    (s) => normalizeBranchId(s.branchId) === targetBranchId
+  );
+  const allDigi = getStoredDigitalTransactions(targetBranchId).filter(
+    (d) => normalizeBranchId(d.branchId) === targetBranchId
+  );
+  const allServices = getStoredServiceOrders().filter(
+    (s) => normalizeBranchId(s.branchId) === targetBranchId
+  );
+  const allExpenses = getStoredExpenses(targetBranchId).filter(
+    (e) => normalizeBranchId(e.branchId) === targetBranchId
+  );
 
   // Filter Sales berdasarkan tanggal
   const filteredSales = allSales.filter((s) => matchesPeriod(s.createdAt, startFilter, endFilter));
@@ -250,6 +263,18 @@ export function computeClientFinancialSummary(filter: ClientAnalyticsFilter): Fi
         ? Number(d.profit)
         : storeFee - bankCost;
     const prof = isHutang ? 0 : rawProf;
+
+    // Mutasi / Drop Modal antar cabang bukan omset pelanggan, hanya hitung biaya admin bank (jika ada) di profit
+    if (
+      t === 'transfer_cabang_keluar' ||
+      t === 'transfer_cabang_masuk' ||
+      method === 'transfer_cabang'
+    ) {
+      if (!isHutang && prof !== 0) {
+        profitTfCard += prof;
+      }
+      continue;
+    }
 
     // Akumulasi SEMUA transaksi card ke total perputaran uang (omset bruto):
     omsetDigi += (paid > 0 ? paid : nominal + storeFee);

@@ -1,5 +1,11 @@
 import { doc, setDoc, onSnapshot, Unsubscribe } from 'firebase/firestore';
 import { db, handleFirestoreError, OperationType } from '../lib/firebase.ts';
+import {
+  getActiveBranchId,
+  getBranchScopedDocId,
+  getBranchStorageKey,
+  normalizeBranchId,
+} from './branchService.ts';
 
 function isPermissionDeniedError(err: unknown): boolean {
   const code = String((err as any)?.code || '').toLowerCase();
@@ -28,10 +34,11 @@ export const EVENT_QRIS_UPDATED = 'konter_qris_updated';
 /**
  * Mengambil konfigurasi QRIS toko yang tersimpan di localStorage (sinkron & instan)
  */
-export function getStoredQrisConfig(): StoreQrisConfig {
+export function getStoredQrisConfig(branchId?: string): StoreQrisConfig {
   if (typeof window === 'undefined') return DEFAULT_QRIS_CONFIG;
+  const key = getBranchStorageKey(STORAGE_KEY_QRIS, branchId || getActiveBranchId());
   try {
-    const raw = localStorage.getItem(STORAGE_KEY_QRIS);
+    const raw = localStorage.getItem(key);
     if (!raw) return DEFAULT_QRIS_CONFIG;
     const parsed = JSON.parse(raw);
     if (parsed && typeof parsed.merchantName === 'string') {
@@ -52,10 +59,11 @@ export function getStoredQrisConfig(): StoreQrisConfig {
 /**
  * Menyimpan konfigurasi QRIS toko ke localStorage dan memicu CustomEvent agar UI reaktif
  */
-export function saveStoredQrisConfig(config: StoreQrisConfig): void {
+export function saveStoredQrisConfig(config: StoreQrisConfig, branchId?: string): void {
   if (typeof window === 'undefined') return;
+  const key = getBranchStorageKey(STORAGE_KEY_QRIS, branchId || getActiveBranchId());
   try {
-    localStorage.setItem(STORAGE_KEY_QRIS, JSON.stringify(config));
+    localStorage.setItem(key, JSON.stringify(config));
     window.dispatchEvent(new CustomEvent(EVENT_QRIS_UPDATED, { detail: config }));
   } catch (err) {
     console.warn('Gagal menyimpan qris config ke localStorage:', err);
@@ -65,24 +73,28 @@ export function saveStoredQrisConfig(config: StoreQrisConfig): void {
 /**
  * Menyimpan konfigurasi QRIS toko ke Cloud Firestore dan localStorage
  */
-export async function saveQrisConfigCloud(config: StoreQrisConfig): Promise<void> {
-  const payload: StoreQrisConfig = {
+export async function saveQrisConfigCloud(
+  config: StoreQrisConfig,
+  branchId?: string
+): Promise<void> {
+  const resolvedBranchId = normalizeBranchId(branchId || getActiveBranchId());
+  const docId = getBranchScopedDocId('qris_profile', resolvedBranchId);
+  const payload: StoreQrisConfig & { branchId?: string } = {
     merchantName: config.merchantName.trim() || DEFAULT_QRIS_CONFIG.merchantName,
     nmid: config.nmid.trim() || DEFAULT_QRIS_CONFIG.nmid,
     subCode: config.subCode?.trim() || 'A01',
     imageUrl: config.imageUrl || '',
+    branchId: resolvedBranchId,
     updatedAt: new Date().toISOString(),
   };
 
-  // 1. Simpan ke Cloud Firestore (koleksi: settings, dokumen: qris_profile)
   try {
-    const qrisDocRef = doc(db, 'settings', 'qris_profile');
+    const qrisDocRef = doc(db, 'settings', docId);
     await setDoc(qrisDocRef, payload, { merge: true });
-    // 2. Simpan ke Local Storage setelah berhasil disinkronkan
-    saveStoredQrisConfig(payload);
+    saveStoredQrisConfig(payload, resolvedBranchId);
   } catch (cloudErr) {
     if (isPermissionDeniedError(cloudErr)) {
-      handleFirestoreError(cloudErr, OperationType.WRITE, 'settings/qris_profile');
+      handleFirestoreError(cloudErr, OperationType.WRITE, `settings/${docId}`);
     }
     console.error('Gagal sinkronisasi QRIS ke Cloud Firestore:', cloudErr);
     throw cloudErr;
@@ -90,13 +102,16 @@ export async function saveQrisConfigCloud(config: StoreQrisConfig): Promise<void
 }
 
 /**
- * Berlangganan (Real-Time Listener) ke Cloud Firestore untuk pembaruan QRIS Toko
+ * Berlangganan (Real-Time Listener) ke Cloud Firestore untuk pembaruan QRIS Toko per cabang
  */
 export function subscribeQrisConfig(
-  onUpdate: (config: StoreQrisConfig) => void
+  onUpdate: (config: StoreQrisConfig) => void,
+  branchId?: string
 ): Unsubscribe {
+  const resolvedBranchId = normalizeBranchId(branchId || getActiveBranchId());
+  const docId = getBranchScopedDocId('qris_profile', resolvedBranchId);
   try {
-    const qrisDocRef = doc(db, 'settings', 'qris_profile');
+    const qrisDocRef = doc(db, 'settings', docId);
     const unsub = onSnapshot(
       qrisDocRef,
       (docSnap) => {
@@ -109,7 +124,7 @@ export function subscribeQrisConfig(
             imageUrl: data.imageUrl || '',
             updatedAt: data.updatedAt,
           };
-          saveStoredQrisConfig(merged);
+          saveStoredQrisConfig(merged, resolvedBranchId);
           onUpdate(merged);
         }
       },
@@ -126,7 +141,6 @@ export function subscribeQrisConfig(
 
 /**
  * Kompres dan ubah file gambar yang diunggah ke Data URL Base64 ringan
- * Memastikan gambar QRIS tetap tajam saat discan namun tidak memberatkan database cloud
  */
 export function resizeImageToDataUrl(file: File, maxSize: number = 600): Promise<string> {
   return new Promise((resolve, reject) => {

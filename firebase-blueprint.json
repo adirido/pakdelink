@@ -11,11 +11,28 @@
         "email": { "type": "string", "maxLength": 128 },
         "name": { "type": "string", "maxLength": 120 },
         "role": { "type": "string", "enum": ["owner", "manager", "cashier", "technician"] },
+        "branchId": { "type": "string", "maxLength": 64 },
         "pin": { "type": "string", "maxLength": 64 },
         "createdAt": { "type": "string", "maxLength": 64 },
         "updatedAt": { "type": "string", "maxLength": 64 }
       },
       "required": ["id", "uid", "employeeId", "name", "role", "pin"]
+    },
+    "Branch": {
+      "title": "Branch",
+      "description": "Data cabang toko (Pusat dan Cabang) beserta informasi nama toko, alamat, dan kontak struk",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 64 },
+        "name": { "type": "string", "maxLength": 120 },
+        "receiptName": { "type": "string", "maxLength": 160 },
+        "address": { "type": "string", "maxLength": 300 },
+        "phone": { "type": "string", "maxLength": 64 },
+        "isActive": { "type": "boolean" },
+        "createdAt": { "type": "string", "maxLength": 64 },
+        "updatedAt": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["id", "name", "receiptName", "address", "phone", "isActive"]
     },
     "StokAksesoris": {
       "title": "StokAksesoris",
@@ -95,6 +112,7 @@
         "referenceNumber": { "type": "string", "maxLength": 128 },
         "status": { "type": "string", "maxLength": 64 },
         "cashierUid": { "type": "string", "maxLength": 128 },
+        "branchId": { "type": "string", "maxLength": 64 },
         "fundSource": { "type": "string", "maxLength": 100 },
         "operatorName": { "type": "string", "maxLength": 120 },
         "notes": { "type": "string", "maxLength": 2000 },
@@ -106,7 +124,7 @@
     },
     "StoreSetting": {
       "title": "StoreSetting",
-      "description": "Pengaturan toko, saldo akun agen digital, konfigurasi QRIS, dan ledger pengambilan margin fee",
+      "description": "Pengaturan toko, saldo akun agen digital, konfigurasi QRIS, dan ledger pengambilan margin fee per cabang",
       "type": "object",
       "properties": {
         "cash": { "type": "number" },
@@ -123,17 +141,19 @@
         "nmid": { "type": "string", "maxLength": 120 },
         "subCode": { "type": "string", "maxLength": 64 },
         "imageUrl": { "type": "string", "maxLength": 900000 },
+        "branchId": { "type": "string", "maxLength": 64 },
         "updatedAt": { "type": "string", "maxLength": 64 }
       }
     },
     "TitipanAccount": {
       "title": "TitipanAccount",
-      "description": "Daftar penitip dan saldo titipan pelanggan",
+      "description": "Daftar penitip dan saldo titipan pelanggan per cabang",
       "type": "object",
       "properties": {
         "id": { "type": "string", "maxLength": 128 },
         "name": { "type": "string", "maxLength": 160 },
         "balance": { "type": "number" },
+        "branchId": { "type": "string", "maxLength": 64 },
         "createdAt": { "type": "string", "maxLength": 64 },
         "updatedAt": { "type": "string", "maxLength": 64 }
       },
@@ -141,7 +161,7 @@
     },
     "StoreExpense": {
       "title": "StoreExpense",
-      "description": "Pencatatan beban operasional dan pengeluaran kas toko",
+      "description": "Pencatatan beban operasional dan pengeluaran kas toko per cabang",
       "type": "object",
       "properties": {
         "id": { "type": "number" },
@@ -150,6 +170,7 @@
         "amount": { "type": "number" },
         "expenseDate": { "type": "string", "maxLength": 32 },
         "paidBy": { "type": "string", "maxLength": 64 },
+        "branchId": { "type": "string", "maxLength": 64 },
         "notes": { "type": "string", "maxLength": 1000 },
         "createdAt": { "type": "string", "maxLength": 64 },
         "updatedAt": { "type": "string", "maxLength": 64 }
@@ -158,9 +179,13 @@
     }
   },
   "firestore": {
+    "/branches/{branchId}": {
+      "schema": { "$ref": "#/entities/Branch" },
+      "description": "Koleksi master cabang toko (Pusat dan Cabang) beserta identitas struk dan status aktif"
+    },
     "/users/{userId}": {
       "schema": { "$ref": "#/entities/AppUser" },
-      "description": "Koleksi data akun pengguna, staf, dan kata sandi terminal POS"
+      "description": "Koleksi data akun pengguna, staf, penempatan cabang, dan kata sandi terminal POS"
     },
     "/stok_aksesoris/{accessoryId}": {
       "schema": { "$ref": "#/entities/StokAksesoris" },
@@ -176,19 +201,19 @@
     },
     "/digital_transactions/{transactionId}": {
       "schema": { "$ref": "#/entities/DigitalTransaction" },
-      "description": "Koleksi transaksi agen digital, transfer, tarik tunai, mutasi antar card, dan margin fee"
+      "description": "Koleksi transaksi agen digital, transfer, tarik tunai, mutasi antar card, mutasi cabang, dan margin fee"
     },
     "/settings/{settingId}": {
       "schema": { "$ref": "#/entities/StoreSetting" },
-      "description": "Dokumen konfigurasi QRIS, saldo akun agen digital, dan catatan margin fee"
+      "description": "Dokumen konfigurasi QRIS, saldo akun agen digital, dan catatan margin fee per cabang"
     },
     "/titipan_accounts/{titipanId}": {
       "schema": { "$ref": "#/entities/TitipanAccount" },
-      "description": "Koleksi data penitip dan saldo titipan pelanggan"
+      "description": "Koleksi data penitip dan saldo titipan pelanggan per cabang"
     },
     "/store_expenses/{expenseId}": {
       "schema": { "$ref": "#/entities/StoreExpense" },
-      "description": "Koleksi catatan pengeluaran dan beban operasional toko"
+      "description": "Koleksi catatan pengeluaran dan beban operasional toko per cabang"
     }
   }
 }

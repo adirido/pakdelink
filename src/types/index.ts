@@ -1,5 +1,16 @@
 export type UserRole = 'owner' | 'manager' | 'cashier' | 'technician';
 
+export interface Branch {
+  id: string;
+  name: string;
+  receiptName: string;
+  address: string;
+  phone: string;
+  isActive: boolean;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
 export interface AppUser {
   id: number;
   uid: string;
@@ -7,6 +18,7 @@ export interface AppUser {
   email: string;
   name: string;
   role: UserRole;
+  branchId?: string;
   pin?: string;
   createdAt?: string;
 }
@@ -92,6 +104,7 @@ export interface Sale {
   amountPaid: number;
   changeAmount: number;
   cashierUid?: string;
+  branchId?: string;
   status: string;
   notes?: string;
   createdAt: string;
@@ -115,6 +128,7 @@ export interface DigitalTransaction {
   referenceNumber: string;
   status: string;
   cashierUid?: string;
+  branchId?: string;
   notes?: string;
   createdAt: string;
   paidAt?: string;
@@ -138,6 +152,7 @@ export interface ServiceSoftwareOrder {
   balanceDue: number;
   status: 'received' | 'in_progress' | 'completed' | 'picked_up' | 'cancelled_failed';
   technicianUid?: string;
+  branchId?: string;
   technicianNotes?: string;
   receivedAt: string;
   completedAt?: string;
@@ -151,6 +166,7 @@ export interface StoreExpense {
   amount: number;
   expenseDate: string;
   paidBy: string;
+  branchId?: string;
   notes?: string;
   createdAt: string;
 }

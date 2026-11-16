@@ -6,6 +6,11 @@ import {
   getLocalDateKey,
   reconcileMarginFeeLedgerAfterDeleteAsync,
 } from '../services/accountBalanceService.ts';
+import {
+  getActiveBranchId,
+  getBranchStorageKey,
+  normalizeBranchId,
+} from '../services/branchService.ts';
 
 export const STORAGE_KEY_DIGITAL = 'konter_digital_transactions';
 export const STORAGE_KEY_SERVICES = 'konter_service_orders';
@@ -27,7 +32,6 @@ export interface DeleteTransactionPayload {
 // 1. LOCAL STORAGE HELPERS & AUTO-PURGE DUMMY
 // ==========================================
 
-// Pembersihan otomatis data dummy lama dari browser localStorage saat aplikasi dimuat
 if (typeof window !== 'undefined') {
   try {
     const CLEANUP_KEY = 'konter_initial_dummy_cleaned_v2';
@@ -43,13 +47,15 @@ if (typeof window !== 'undefined') {
 }
 
 // --- Digital Transactions ---
-export function getStoredDigitalTransactions(): DigitalTransaction[] {
+export function getStoredDigitalTransactions(branchId?: string): DigitalTransaction[] {
+  if (typeof window === 'undefined') return [];
+  const resolvedBranchId = normalizeBranchId(branchId || getActiveBranchId());
+  const key = getBranchStorageKey(STORAGE_KEY_DIGITAL, resolvedBranchId);
   try {
-    const raw = localStorage.getItem(STORAGE_KEY_DIGITAL);
+    const raw = localStorage.getItem(key);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
-    // Filter keluar data dummy legacy (ID 301-320 atau prefix dummy)
     return parsed.filter(
       (item) => !(item.id >= 301 && item.id <= 325) && !item.referenceNumber?.startsWith('TRX-BRI-98124')
     );
@@ -58,10 +64,17 @@ export function getStoredDigitalTransactions(): DigitalTransaction[] {
   }
 }
 
-export function saveStoredDigitalTransactions(list: DigitalTransaction[], silent: boolean = false): void {
+export function saveStoredDigitalTransactions(
+  list: DigitalTransaction[],
+  silent: boolean = false,
+  branchId?: string
+): void {
+  if (typeof window === 'undefined') return;
+  const resolvedBranchId = normalizeBranchId(branchId || getActiveBranchId());
+  const key = getBranchStorageKey(STORAGE_KEY_DIGITAL, resolvedBranchId);
   try {
-    localStorage.setItem(STORAGE_KEY_DIGITAL, JSON.stringify(list));
-    if (!silent) {
+    localStorage.setItem(key, JSON.stringify(list));
+    if (!silent && resolvedBranchId === getActiveBranchId()) {
       notifyDataUpdated('digital');
     }
   } catch (e) {
@@ -69,23 +82,28 @@ export function saveStoredDigitalTransactions(list: DigitalTransaction[], silent
   }
 }
 
-export function removeStoredDigitalTransaction(id: number, refNumber?: string): DigitalTransaction[] {
-  const current = getStoredDigitalTransactions();
+export function removeStoredDigitalTransaction(
+  id: number,
+  refNumber?: string,
+  branchId?: string
+): DigitalTransaction[] {
+  const resolvedBranchId = normalizeBranchId(branchId || getActiveBranchId());
+  const current = getStoredDigitalTransactions(resolvedBranchId);
   const updated = current.filter(
     (item) => item.id !== id && (refNumber ? item.referenceNumber !== refNumber : true)
   );
-  saveStoredDigitalTransactions(updated);
+  saveStoredDigitalTransactions(updated, false, resolvedBranchId);
   return updated;
 }
 
 // --- Service Software Orders ---
 export function getStoredServiceOrders(): ServiceSoftwareOrder[] {
+  if (typeof window === 'undefined') return [];
   try {
     const raw = localStorage.getItem(STORAGE_KEY_SERVICES);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
-    // Filter keluar data dummy legacy (ID 401-425 atau prefix dummy)
     return parsed.filter(
       (item) => !(item.id >= 401 && item.id <= 425) && !item.orderNumber?.startsWith('SRV-20261026-001')
     );
@@ -95,6 +113,7 @@ export function getStoredServiceOrders(): ServiceSoftwareOrder[] {
 }
 
 export function saveStoredServiceOrders(list: ServiceSoftwareOrder[]): void {
+  if (typeof window === 'undefined') return;
   try {
     localStorage.setItem(STORAGE_KEY_SERVICES, JSON.stringify(list));
     notifyDataUpdated('service');
@@ -123,6 +142,7 @@ const KNOWN_ACCESSORY_COSTS: Record<string, number> = {
 
 // --- POS Sales ---
 export function getStoredSales(): Sale[] {
+  if (typeof window === 'undefined') return [];
   try {
     const raw = localStorage.getItem(STORAGE_KEY_SALES);
     if (!raw) return [];
@@ -204,6 +224,7 @@ export function getStoredSales(): Sale[] {
 }
 
 export function saveStoredSales(list: Sale[]): void {
+  if (typeof window === 'undefined') return;
   try {
     localStorage.setItem(STORAGE_KEY_SALES, JSON.stringify(list));
     notifyDataUpdated('pos');
@@ -222,9 +243,12 @@ export function removeStoredSale(id: number, invoiceNumber?: string): Sale[] {
 }
 
 // --- Store Expenses (Beban Operasional Toko) ---
-export function getStoredExpenses(): StoreExpense[] {
+export function getStoredExpenses(branchId?: string): StoreExpense[] {
+  if (typeof window === 'undefined') return [];
+  const resolvedBranchId = normalizeBranchId(branchId || getActiveBranchId());
+  const key = getBranchStorageKey(STORAGE_KEY_EXPENSES, resolvedBranchId);
   try {
-    const raw = localStorage.getItem(STORAGE_KEY_EXPENSES);
+    const raw = localStorage.getItem(key);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     return Array.isArray(parsed) ? parsed : [];
@@ -233,19 +257,25 @@ export function getStoredExpenses(): StoreExpense[] {
   }
 }
 
-export function saveStoredExpenses(list: StoreExpense[]): void {
+export function saveStoredExpenses(list: StoreExpense[], branchId?: string): void {
+  if (typeof window === 'undefined') return;
+  const resolvedBranchId = normalizeBranchId(branchId || getActiveBranchId());
+  const key = getBranchStorageKey(STORAGE_KEY_EXPENSES, resolvedBranchId);
   try {
-    localStorage.setItem(STORAGE_KEY_EXPENSES, JSON.stringify(list));
-    notifyDataUpdated('all');
+    localStorage.setItem(key, JSON.stringify(list));
+    if (resolvedBranchId === getActiveBranchId()) {
+      notifyDataUpdated('all');
+    }
   } catch (e) {
     console.warn('Failed to save expenses to localStorage:', e);
   }
 }
 
-export function removeStoredExpense(id: number): StoreExpense[] {
-  const current = getStoredExpenses();
+export function removeStoredExpense(id: number, branchId?: string): StoreExpense[] {
+  const resolvedBranchId = normalizeBranchId(branchId || getActiveBranchId());
+  const current = getStoredExpenses(resolvedBranchId);
   const updated = current.filter((item) => item.id !== id);
-  saveStoredExpenses(updated);
+  saveStoredExpenses(updated, resolvedBranchId);
   return updated;
 }
 
@@ -253,22 +283,12 @@ export function removeStoredExpense(id: number): StoreExpense[] {
 // 2. CENTRALIZED DELETE HANDLER
 // ==========================================
 
-/**
- * Fungsi Hapus Terpusat:
- * 1. Mengidentifikasi kategori modul ('pos' | 'digital' | 'service') dan ID / nomor faktur.
- * 2. Membaca daftar item transaksi penjualan jika POS dan mengembalikan stok (Restock) ke Cloud Firestore (Aksesoris & HP/IMEI).
- * 3. Memanggil backend REST API untuk menghapus data di database (PostgreSQL) serta mengembalikan stok fisik di database relational.
- * 4. Menghapus record secara langsung dari localStorage modul asal.
- * 5. Menyiarkan (broadcast) CustomEvent ke seluruh aplikasi agar modul asal langsung bereaksi dan reaktif mengupdate tabel & KPI tanpa refresh.
- */
 export async function executeUnifiedDelete(payload: DeleteTransactionPayload): Promise<{ success: boolean; message: string; restoredCount?: number }> {
   const { category, rawId, invoiceNumber } = payload;
 
-  // 1. Jika kategori POS (Penjualan Retail): Ambil detail item & pulihkan stok ke Cloud Firestore
   if (category === 'pos') {
     let itemsToRestore = payload.items;
 
-    // Jika item belum disertakan di payload, cari di penyimpanan lokal
     if (!itemsToRestore || itemsToRestore.length === 0) {
       const stored = getStoredSales();
       const matchedSale = stored.find(
@@ -279,7 +299,6 @@ export async function executeUnifiedDelete(payload: DeleteTransactionPayload): P
       }
     }
 
-    // Jika masih belum ada, coba baca langsung dari server API sebelum transaksi dihapus
     if (!itemsToRestore || itemsToRestore.length === 0) {
       try {
         const saleRes = await fetch(`/api/sales/${rawId}`);
@@ -294,7 +313,6 @@ export async function executeUnifiedDelete(payload: DeleteTransactionPayload): P
       }
     }
 
-    // Eksekusi pemulihan stok ke Cloud Firestore (Aksesoris & HP/IMEI)
     if (itemsToRestore && itemsToRestore.length > 0) {
       try {
         await restoreStockFromSaleCloud(itemsToRestore);
@@ -313,11 +331,11 @@ export async function executeUnifiedDelete(payload: DeleteTransactionPayload): P
     endpoint = `/api/services/${rawId}?orderNumber=${encodeURIComponent(invoiceNumber)}`;
   }
 
-  // 2. Hapus di Cloud Firestore terlebih dahulu untuk kategori 'digital' agar persisten lintas publish
+  const targetBranchId = normalizeBranchId(payload.digitalItem?.branchId || getActiveBranchId());
   let targetTxForDigital: DigitalTransaction | undefined = payload.digitalItem;
   if (category === 'digital') {
     if (!targetTxForDigital) {
-      const currentDigi = getStoredDigitalTransactions();
+      const currentDigi = getStoredDigitalTransactions(targetBranchId);
       targetTxForDigital = currentDigi.find(
         (d) => d.id === rawId || (invoiceNumber ? d.referenceNumber === invoiceNumber : false)
       );
@@ -325,7 +343,6 @@ export async function executeUnifiedDelete(payload: DeleteTransactionPayload): P
     await deleteDigitalTransactionFromCloud(rawId, invoiceNumber);
   }
 
-  // 3. Request ke Backend API opsional (jika server Express / SQL aktif)
   let serverDeleted: any = null;
   try {
     const res = await fetch(endpoint, { method: 'DELETE' });
@@ -339,7 +356,6 @@ export async function executeUnifiedDelete(payload: DeleteTransactionPayload): P
     console.warn('Server delete call skipped/offline:', err);
   }
 
-  // 4. Cascade Hapus Data dari LocalStorage Modul Asal & Pengembalian Saldo Otomatis (Reversal)
   if (category === 'pos') {
     removeStoredSale(rawId, invoiceNumber);
   } else if (category === 'digital') {
@@ -352,6 +368,8 @@ export async function executeUnifiedDelete(payload: DeleteTransactionPayload): P
           serverDeleted.notes?.match(/\[Sumber(?:\s*Dana)?:\s*([^\]]+)\]/i)?.[1]?.trim(),
       };
     }
+
+    const txBranchId = normalizeBranchId(targetTx?.branchId || targetBranchId);
 
     if (targetTx) {
       const resolvedFundSource =
@@ -370,19 +388,19 @@ export async function executeUnifiedDelete(payload: DeleteTransactionPayload): P
         nominal: Number(targetTx.nominal || 0),
         totalCustomerPaid: Number(targetTx.totalCustomerPaid || 0),
         paymentMethod: targetTx.paymentMethod || 'cash',
+        branchId: txBranchId,
       });
     } else {
       console.warn('Data transaksi digital tidak ditemukan untuk rollback saldo');
     }
 
-    const remainingDigital = removeStoredDigitalTransaction(rawId, invoiceNumber);
+    const remainingDigital = removeStoredDigitalTransaction(rawId, invoiceNumber, txBranchId);
     const deletedDateKey = getLocalDateKey(targetTx?.createdAt || new Date());
-    await reconcileMarginFeeLedgerAfterDeleteAsync(deletedDateKey, remainingDigital);
+    await reconcileMarginFeeLedgerAfterDeleteAsync(deletedDateKey, remainingDigital, txBranchId);
   } else if (category === 'service') {
     removeStoredServiceOrder(rawId, invoiceNumber);
   }
 
-  // 4. Broadcast Event Sinkronisasi ke Seluruh Komponen Aktif
   notifyTransactionDeleted(payload);
   notifyDataUpdated(category);
 
